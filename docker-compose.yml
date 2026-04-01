@@ -41,9 +41,10 @@ services:
       NAT_PORT:    8201
       EXTRA_ARGS:  ${EXTRA_ARGS:-}
     volumes:
-      # Persist logs and the server cert outside the container
-      - server_logs:/app/server.log
-      - server_cert:/app/server.pem
+      # Persist logs outside the container
+      - server_logs:/app/logs
+      # Persist cert and config files in a data volume (never mount as a file path)
+      - server_data:/app/data
       # Optional: mount custom motd / agreement files
       # - ./server_motd.txt:/app/server_motd.txt:ro
       # - ./server_agreement.txt:/app/server_agreement.txt:ro
@@ -53,7 +54,7 @@ services:
 volumes:
   db_data:
   server_logs:
-  server_cert:
+  server_data:
 
 networks:
   internal:

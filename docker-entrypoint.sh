@@ -1,10 +1,13 @@
 #!/bin/bash
 set -e
 
+# ── Ensure log directory exists ────────────────────────────────────────────────
+mkdir -p /app/logs
+
 # ── Wait for MariaDB to be ready ───────────────────────────────────────────────
 echo "Waiting for MariaDB at ${DB_HOST:-db}:${DB_PORT:-3306}..."
 until python3 -c "
-import sys, time
+import sys
 try:
     import MySQLdb
     MySQLdb.connect(
@@ -32,7 +35,7 @@ SQLURL="mysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?chars
 
 # ── Start uberserver ───────────────────────────────────────────────────────────
 echo "Starting uberserver..."
-exec python3 server.py \
+exec /app/venv/bin/python3 server.py \
     --port "${LOBBY_PORT:-8200}" \
     --natport "${NAT_PORT:-8201}" \
     --sqlurl "${SQLURL}" \

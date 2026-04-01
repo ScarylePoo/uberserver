@@ -5,3 +5,4 @@ SQLAlchemy==1.4.52
 Twisted==24.3.0
 maxminddb==2.6.2
 requests==2.31.0
+service-identity==24.1.0
