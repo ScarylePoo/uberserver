@@ -1,82 +1,233 @@
-# Project Overview
-Uberserver is a lobbyserver written in python for spring lobby clients. It is currently used as the main lobby server running at lobby.springrts.com port 8200.
+# Uberserver Deployment Guide
+
+A start-to-finish guide for running uberserver on Ubuntu Server 24.04 LTS using Docker and MariaDB.
+
+**Repository:** https://github.com/ScarylePoo/uberserver
+
+---
 
 ## Prerequisites
-This project is built using Python 3. Make sure you have the following installed before proceeding:
-- `Python 3`
-- `SQLAlchemy`
-- `GeoIP`
-- `Twisted`
 
-### System Packages Required
-For Debian/Ubuntu:
-- `libssl-1.0-dev`
-- `libgeoip-dev`
-- `libmariadbclient-dev` or `libmysqlclient-dev`
+- Ubuntu Server 24.04 LTS
+- A non-root user with sudo privileges
+- Ports **8200 (TCP)** and **8201 (UDP)** available
 
-```
-# apt update
-# apt install libssl1.0-dev libgeoip-dev libmariadbclient-dev
-```
+---
 
+## 1. Install Docker
 
-## Installation Steps
-### Option 1: Manual Installation
-1. Clone the uberserver source code:
-    ```bash
-    git clone git@github.com:spring/uberserver.git
-    ```
-2. Create a Python virtual environment:
-    ```bash
-    virtualenv ~/virtenvs/uberserver
-    source ~/virtenvs/uberserver/bin/activate
-    ```
-3. Install Python dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-4. SQLite is used by default. For production, consider setting up MySQL or PostgreSQL.
-
-### Option 2: Using Docker for Local Server
-1. Build and run the local server:
-    ```bash
-    cd docker
-    docker-compose build
-    docker-compose up
-    ```
-2. To find the container ID:
-    ```bash
-    docker ps
-    ```
-3. Access the database and add users:
-    ```bash
-    docker exec -it your_container_id bash
-    sqlite3 local_server.db
-    ```
-
-4. Use the following command to log in:
-    ```bash
-    docker logs your_container_id
-    ```
-
-The address will look like "private: 192.168.100.17:8200". Use it to log in with `user1/123`.
-
-## Usage
-Activate the virtual environment and start the server:
 ```bash
-source ~/virtenvs/uberserver/bin/activate
-./server.py
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
 ```
 
-## Logs
-- Log file: `$PWD/server.log`
+Log out and back in after this, then verify it worked:
 
-## External Documents
-Refer to https://springrts.com/wiki/Uberserver for more details.
+```bash
+docker run hello-world
+```
 
-## Help and Support
-For any issues or questions, refer to the server logs or Docker logs. You can also raise issues on the [GitHub Repository](https://github.com/spring/uberserver).
+---
 
+## 2. Clone the Repository
 
+```bash
+git clone https://github.com/ScarylePoo/uberserver.git
+cd uberserver
+```
 
+---
 
+## 3. Configure the Environment
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Fill in your values:
+
+| Setting | Description |
+|---|---|
+| `DB_ROOT_PASSWORD` | MariaDB root password. Set something strong. |
+| `DB_PASSWORD` | MariaDB password for the uberserver user. Set something strong. |
+| `DB_NAME` | Database name. Default: `uberserver` |
+| `DB_USER` | Database username. Default: `uberserver` |
+| `LOBBY_PORT` | Port clients connect to. Default: `8200` |
+| `NAT_PORT` | Port for NAT hole-punching. Default: `8201` |
+| `MAXMIND_LICENSE_KEY` | Optional. Free key from [maxmind.com](https://www.maxmind.com/en/geolite2/signup) for country flags. Without it, players will have ?? for country flags. Leave blank to skip. |
+| `EXTRA_ARGS` | Optional extra arguments passed to server.py. |
+
+> **Never commit your `.env` file to source control — it contains passwords.**
+
+---
+
+## 4. Build and Start
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+The build takes a few minutes the first time. Check it started successfully:
+
+```bash
+docker compose logs -f uberserver
+```
+
+You should see:
+
+```
+MariaDB is up.
+Starting uberserver...
+Started lobby server!
+```
+
+Press `Ctrl+C` to stop watching logs. The server keeps running in the background.
+
+---
+
+## 5. Open Firewall Ports
+
+```bash
+sudo ufw allow 8200/tcp
+sudo ufw allow 8201/udp
+```
+
+> If you're on a cloud VPS (AWS, Hetzner, DigitalOcean etc.), also open these ports in your cloud provider's firewall or security group.
+
+---
+
+## 6. Create an Admin User
+
+Connect to the database:
+
+```bash
+docker compose exec db mariadb -u uberserver -p uberserver
+```
+
+Enter your `DB_PASSWORD` when prompted. Then generate a password hash — open another terminal and run:
+
+```bash
+docker compose exec uberserver /app/venv/bin/python3 -c "
+import hashlib, base64
+pw = 'your_chosen_password'
+print(base64.b64encode(hashlib.md5(pw.encode()).digest()).decode())
+"
+```
+
+Then back in the MariaDB shell, insert your admin user:
+
+```sql
+INSERT INTO users (username, password, access, register_date, last_login, last_ip, last_agent, last_sys_id, last_mac_id, ingame_time, bot)
+VALUES ('yourusername', 'PASTE_HASH_HERE', 'admin', NOW(), NOW(), '127.0.0.1', '', '', '', 0, 0);
+```
+
+Verify it was created:
+
+```sql
+SELECT id, username, access FROM users;
+```
+
+Type `exit` to leave the MariaDB shell.
+
+---
+
+## 7. Connect with a Lobby Client
+
+Use any Spring lobby client (e.g. [SkyLobby](https://github.com/skynet-gh/skylobby) or [SpringLobby](https://springlobby.springrts.com/)) and add a custom server pointing to your server's IP on port `8200`. Make sure TLS/SSL is **disabled** when connecting to a private server with a self-signed certificate.
+
+---
+
+## Day-to-Day Management
+
+| Command | What it does |
+|---|---|
+| `docker compose up -d` | Start everything |
+| `docker compose down` | Stop everything |
+| `docker compose restart uberserver` | Restart just the lobby server |
+| `docker compose logs -f uberserver` | Watch live logs |
+| `docker compose ps` | Check container status |
+| `docker compose build --no-cache` | Rebuild from scratch (e.g. after pulling updates) |
+
+### Updating
+
+```bash
+git pull
+docker compose build --no-cache
+docker compose up -d
+```
+
+### Auto-start on Reboot
+
+Docker's `restart: unless-stopped` policy means containers restart automatically after a reboot, as long as the Docker daemon starts on boot:
+
+```bash
+sudo systemctl enable docker
+```
+
+---
+
+## ChanServ Admin Commands
+
+Once logged in as an admin, you manage the server through the **ChanServ** bot. Commands are prefixed with `:` and can be sent as a PM to ChanServ, or typed inside a channel (omitting the channel name).
+
+### Channel Management
+
+| Command | Who can use it |
+|---|---|
+| `:register chanName [founder]` | Moderators |
+| `:unregister chanName` | Moderators |
+| `:op chanName username` | Moderators, channel founder |
+| `:deop chanName username` | Moderators, channel founder |
+| `:history chanName on\|off` | Moderators, channel founder |
+| `:antispam chanName on\|off` | Moderators, channel founder |
+
+### User Management
+
+| Command | Who can use it |
+|---|---|
+| `:topic chanName topic text` | Ops, moderators, founder |
+| `:kick chanName username` | Ops, moderators, founder |
+| `:mute chanName username 2d reason` | Ops, moderators, founder |
+| `:unmute chanName username` | Ops, moderators, founder |
+| `:ban chanName username 7d reason` | Ops, moderators, founder |
+| `:unban chanName username` | Ops, moderators, founder |
+| `:listbans` | Ops, moderators, founder |
+| `:listmutes` | Ops, moderators, founder |
+
+Duration format: `1h` = one hour, `2d` = two days.
+
+### Changing a User's Access Level
+
+Do this directly in the database:
+
+```bash
+docker compose exec db mariadb -u uberserver -p uberserver
+```
+
+```sql
+UPDATE users SET access = 'moderator' WHERE username = 'someuser';
+```
+
+Valid access levels: `fresh`, `agreement`, `user`, `moderator`, `admin`, `bot`
+
+---
+
+## Troubleshooting
+
+**Container keeps restarting**
+```bash
+docker compose exec uberserver cat /app/server.log
+```
+
+**Can't connect on port 8200**
+- Check containers are running: `docker compose ps`
+- Check firewall: `sudo ufw status`
+- Test locally: `telnet localhost 8200`
+
+**Need to wipe and start fresh** (deletes all data)
+```bash
+docker compose down -v
+docker compose up -d
+```
