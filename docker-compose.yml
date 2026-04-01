@@ -1,0 +1,60 @@
+services:
+
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE:      ${DB_NAME:-uberserver}
+      MARIADB_USER:          ${DB_USER:-uberserver}
+      MARIADB_PASSWORD:      ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  uberserver:
+    build:
+      context: .
+      args:
+        # Get a free key at https://www.maxmind.com/en/geolite2/signup
+        MAXMIND_LICENSE_KEY: ${MAXMIND_LICENSE_KEY:-}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${LOBBY_PORT:-8200}:8200"       # TCP  – lobby clients connect here
+      - "${NAT_PORT:-8201}:8201/udp"     # UDP  – NAT hole-punching
+    environment:
+      DB_HOST:     db
+      DB_PORT:     3306
+      DB_NAME:     ${DB_NAME:-uberserver}
+      DB_USER:     ${DB_USER:-uberserver}
+      DB_PASSWORD: ${DB_PASSWORD}
+      LOBBY_PORT:  8200
+      NAT_PORT:    8201
+      EXTRA_ARGS:  ${EXTRA_ARGS:-}
+    volumes:
+      # Persist logs and the server cert outside the container
+      - server_logs:/app/server.log
+      - server_cert:/app/server.pem
+      # Optional: mount custom motd / agreement files
+      # - ./server_motd.txt:/app/server_motd.txt:ro
+      # - ./server_agreement.txt:/app/server_agreement.txt:ro
+    networks:
+      - internal
+
+volumes:
+  db_data:
+  server_logs:
+  server_cert:
+
+networks:
+  internal:
+    driver: bridge
