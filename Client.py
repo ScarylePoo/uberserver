@@ -197,7 +197,7 @@ class Client():
 		for command in commands_buffer:
 			if len(command) > flood_limits['msglength']:
 				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (msg_length_limit, command[0: 16]))
-				self.ReportFloodBreach("max message length (cmd=\%s...\)" % command[0: 16], len(command))
+				self.ReportFloodBreach("max message length (cmd=%s...)" % command[0: 16], len(command))
 				continue
 			self.HandleProtocolCommand(command)
 

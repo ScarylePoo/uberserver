@@ -55,7 +55,7 @@ Fill in your values:
 | `DB_USER` | Database username. Default: `uberserver` |
 | `LOBBY_PORT` | Port clients connect to. Default: `8200` |
 | `NAT_PORT` | Port for NAT hole-punching. Default: `8201` |
-| `MAXMIND_LICENSE_KEY` | Optional. Free key from [maxmind.com](https://www.maxmind.com/en/geolite2/signup) for country flags. Without it, players will have ?? for country flags. Leave blank to skip. |
+| `MAXMIND_LICENSE_KEY` | Optional. Free key from [maxmind.com](https://www.maxmind.com/en/geolite2/signup) for country flags. Leave blank to skip. |
 | `EXTRA_ARGS` | Optional extra arguments passed to server.py. |
 
 > **Never commit your `.env` file to source control — it contains passwords.**
@@ -231,3 +231,110 @@ docker compose exec uberserver cat /app/server.log
 docker compose down -v
 docker compose up -d
 ```
+
+---
+
+## Optional Config Files
+
+These files live in the root of the repository (alongside `server.py`). They are picked up automatically when the server starts — no rebuild required, just restart the container after adding or changing them.
+
+### server_motd.txt — Message of the Day
+
+Displayed to every user when they log in. One line per message. Plain text.
+
+```
+Welcome to My Uberserver!
+Visit our Discord at discord.gg/example
+```
+
+To apply changes:
+
+```bash
+docker compose cp server_motd.txt uberserver:/app/server_motd.txt
+docker compose restart uberserver
+```
+
+---
+
+### server_agreement.txt — Terms of Service
+
+Shown to new users when they register. They must accept it before their account is activated. One line per paragraph. Plain text.
+
+```
+Welcome to My Uberserver.
+
+By registering you agree to behave respectfully towards other players.
+No cheating, hacking, or abusive behaviour is permitted.
+
+The server administrators reserve the right to ban any user at any time.
+```
+
+To apply changes:
+
+```bash
+docker compose cp server_agreement.txt uberserver:/app/server_agreement.txt
+docker compose restart uberserver
+```
+
+> **Note:** If no agreement file is present, the server uses a default warning message and does not block registration.
+
+---
+
+### server_email_account.txt — Email / SMTP Configuration
+
+Required if you want email verification on registration and password reset emails. If this file does not exist, email verification is disabled and users can register without providing an email address.
+
+The file has up to 5 lines:
+
+```
+line 1: from address (required)
+line 2: SMTP host (required for external relay)
+line 3: SMTP port (optional, default 587)
+line 4: SMTP username (optional)
+line 5: SMTP password (optional)
+```
+
+**Example using AuthSMTP:**
+
+```
+no-reply@yourdomain.com
+mail.authsmtp.com
+587
+your_authsmtp_username
+your_authsmtp_password
+```
+
+**Example using Gmail:**
+
+```
+no-reply@yourdomain.com
+smtp.gmail.com
+587
+your.email@gmail.com
+your_app_password
+```
+
+> For Gmail you must use an [App Password](https://support.google.com/accounts/answer/185833), not your regular password. Two-factor authentication must be enabled on your Google account first.
+
+To apply:
+
+```bash
+docker compose cp server_email_account.txt uberserver:/app/server_email_account.txt
+docker compose restart uberserver
+```
+
+Confirm it loaded correctly:
+
+```bash
+docker compose exec uberserver grep -i "smtp\|email account" /app/server.log
+```
+
+You should see:
+
+```
+Server email account is no-reply@yourdomain.com
+SMTP relay: mail.authsmtp.com:587
+```
+
+> **Note:** The email patch to support external SMTP is already included in the repository. The original code only supported a local mail server on port 25.
+

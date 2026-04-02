@@ -41,6 +41,10 @@ class DataHandler:
 		self.motd = []
 		self.iphub_xkey = None
 		self.mail_user = None		
+		self.mail_smtp_host = None
+		self.mail_smtp_port = 587
+		self.mail_smtp_user = None
+		self.mail_smtp_pass = None
 		self.trusted_proxies = set([])		
 		
 		self.server = 'TASSERVER'
@@ -437,10 +441,15 @@ class DataHandler:
 		
 		try:
 			with open('server_email_account.txt', 'r') as f:
-				lines = f.readlines()
-			lines = [l.strip() for l in lines]
-			self.mail_user = lines[0]
+				file_lines = [l.strip() for l in f.readlines()]
+			self.mail_user = file_lines[0]
+			if len(file_lines) > 1: self.mail_smtp_host = file_lines[1]
+			if len(file_lines) > 2: self.mail_smtp_port = int(file_lines[2])
+			if len(file_lines) > 3: self.mail_smtp_user = file_lines[3]
+			if len(file_lines) > 4: self.mail_smtp_pass = file_lines[4]
 			logging.info('Server email account is %s' % self.mail_user)
+			if self.mail_smtp_host:
+				logging.info('SMTP relay: %s:%s' % (self.mail_smtp_host, self.mail_smtp_port))
 		except Exception as e:
 			logging.error('Could not load server_email_account.txt: %s' %(e))
 

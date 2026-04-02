@@ -1167,12 +1167,24 @@ class VerificationsHandler:
 			return
 		body += "\r\n\r\nIf you received this message in error, please contact us at " + self.mail_contact_addr + ". Direct replies to this message will be automatically deleted."
 		message = MIMEText(body, 'plain')
-		message['Subject'] = subject 
+		message['Subject'] = subject
 		message['From'] = self.mail_identity + " <" + sent_from + ">"
-		message['To'] = "," + to
+		message['To'] = to
 		try:
-			server = smtplib.SMTP()
-			server.connect()
+			smtp_host = getattr(self._root, 'mail_smtp_host', None)
+			smtp_port = int(getattr(self._root, 'mail_smtp_port', 587))
+			smtp_user = getattr(self._root, 'mail_smtp_user', None)
+			smtp_pass = getattr(self._root, 'mail_smtp_pass', None)
+			if smtp_host:
+				server = smtplib.SMTP(smtp_host, smtp_port)
+				server.ehlo()
+				server.starttls()
+				server.ehlo()
+				if smtp_user and smtp_pass:
+					server.login(smtp_user, smtp_pass)
+			else:
+				server = smtplib.SMTP()
+				server.connect()
 			server.sendmail(sent_from, to, message.as_string())
 			server.close()
 			logging.info('Sent email to %s' % (to))

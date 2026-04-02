@@ -320,7 +320,7 @@ class Protocol:
 
 
 	def get_function_args(self, client, command, function, numspaces, args):
-		function_info = inspect.getargspec(function)
+		function_info = inspect.getfullargspec(function)
 		total_args = len(function_info[0]) - 2
 
 		# if there are no arguments, just call the function
