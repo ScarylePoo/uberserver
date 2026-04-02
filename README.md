@@ -146,9 +146,43 @@ Use any Spring lobby client (e.g. [SkyLobby](https://github.com/skynet-gh/skylob
 | `docker compose up -d` | Start everything |
 | `docker compose down` | Stop everything |
 | `docker compose restart uberserver` | Restart just the lobby server |
-| `docker compose logs -f uberserver` | Watch live logs |
+| `docker compose logs -f uberserver` | Watch live logs (Ctrl+C to stop) |
 | `docker compose ps` | Check container status |
 | `docker compose build --no-cache` | Rebuild from scratch (e.g. after pulling updates) |
+
+### Accessing the Container Shell
+
+To open a bash shell inside the running uberserver container:
+
+```bash
+docker compose exec uberserver bash
+```
+
+To exit the shell and return to the host:
+
+```bash
+exit
+```
+
+### Monitoring the Server Log
+
+Watch live output from the server (Ctrl+C to stop):
+
+```bash
+docker compose logs -f uberserver
+```
+
+Read the persistent log file inside the container:
+
+```bash
+docker compose exec uberserver cat /app/server.log
+```
+
+Tail the last 50 lines of the log file:
+
+```bash
+docker compose exec uberserver tail -50 /app/server.log
+```
 
 ### Updating
 
@@ -214,29 +248,16 @@ Valid access levels: `fresh`, `agreement`, `user`, `moderator`, `admin`, `bot`
 
 ---
 
-## Troubleshooting
+## Optional Config Files
 
-**Container keeps restarting**
+These files live in the root of the repository alongside `server.py`. After creating or editing any of them, copy them into the running container and restart:
+
 ```bash
-docker compose exec uberserver cat /app/server.log
-```
-
-**Can't connect on port 8200**
-- Check containers are running: `docker compose ps`
-- Check firewall: `sudo ufw status`
-- Test locally: `telnet localhost 8200`
-
-**Need to wipe and start fresh** (deletes all data)
-```bash
-docker compose down -v
-docker compose up -d
+docker compose cp filename.txt uberserver:/app/filename.txt
+docker compose restart uberserver
 ```
 
 ---
-
-## Optional Config Files
-
-These files live in the root of the repository (alongside `server.py`). They are picked up automatically when the server starts — no rebuild required, just restart the container after adding or changing them.
 
 ### server_motd.txt — Message of the Day
 
@@ -247,18 +268,11 @@ Welcome to My Uberserver!
 Visit our Discord at discord.gg/example
 ```
 
-To apply changes:
-
-```bash
-docker compose cp server_motd.txt uberserver:/app/server_motd.txt
-docker compose restart uberserver
-```
-
 ---
 
 ### server_agreement.txt — Terms of Service
 
-Shown to new users when they register. They must accept it before their account is activated. One line per paragraph. Plain text.
+Shown to new users on registration. They must accept it before their account is activated. One line per paragraph.
 
 ```
 Welcome to My Uberserver.
@@ -269,14 +283,7 @@ No cheating, hacking, or abusive behaviour is permitted.
 The server administrators reserve the right to ban any user at any time.
 ```
 
-To apply changes:
-
-```bash
-docker compose cp server_agreement.txt uberserver:/app/server_agreement.txt
-docker compose restart uberserver
-```
-
-> **Note:** If no agreement file is present, the server uses a default warning message and does not block registration.
+> If no agreement file is present the server uses a default warning message and does not block registration.
 
 ---
 
@@ -287,11 +294,11 @@ Required if you want email verification on registration and password reset email
 The file has up to 5 lines:
 
 ```
-line 1: from address (required)
-line 2: SMTP host (required for external relay)
-line 3: SMTP port (optional, default 587)
-line 4: SMTP username (optional)
-line 5: SMTP password (optional)
+line 1: from address        (required)
+line 2: SMTP host           (required for external relay)
+line 3: SMTP port           (optional, default 587)
+line 4: SMTP username       (optional)
+line 5: SMTP password       (optional)
 ```
 
 **Example using AuthSMTP:**
@@ -314,27 +321,141 @@ your.email@gmail.com
 your_app_password
 ```
 
-> For Gmail you must use an [App Password](https://support.google.com/accounts/answer/185833), not your regular password. Two-factor authentication must be enabled on your Google account first.
+> For Gmail you must use an [App Password](https://support.google.com/accounts/answer/185833), not your regular password. Two-factor authentication must be enabled first.
 
-To apply:
+---
+
+### server_iphub_xkey.txt — VPN/Proxy Detection
+
+Contains a single API key from [iphub.info](https://iphub.info). When present, the server checks each registering user's IP against the IPHub API. Users connecting from VPNs, datacenters, or non-residential IPs will have their account activation delayed by 24 hours. This is a useful anti-abuse measure for public servers.
+
+```
+your_iphub_api_key_here
+```
+
+Get a free API key at https://iphub.info — the free tier allows 1,000 checks per day.
+
+> If this file is not present, IP checking is disabled and all registrations are processed immediately regardless of IP type.
+
+---
+
+### bad_words.txt — Profanity Filter
+
+A list of words to censor in chat. One word per line. The server replaces matched words with `***` in channels where censoring is enabled (`#main` and `#newbies` by default).
+
+You can optionally provide a replacement word by putting it after a space:
+
+```
+badword
+anotherbadword replacement
+```
+
+The second example would replace `anotherbadword` with `replacement` instead of `***`.
+
+> If this file is not present, no word censoring is applied.
+
+---
+
+### bad_sites.txt — URL/Site Blacklist
+
+A list of domain names or URL fragments to block from chat. One entry per line, lowercase. If a message contains any of these strings it is silently dropped.
+
+```
+badsite.com
+anotherbadsite.net
+```
+
+> If this file is not present, no URL filtering is applied.
+
+---
+
+### bad_nicks.txt — Username Blacklist
+
+A list of usernames or username fragments that are not allowed to be registered. One entry per line, lowercase. Useful for blocking offensive names or impersonations of admin accounts.
+
+```
+badusername
+admin
+moderator
+```
+
+> If this file is not present, no username blacklisting is applied beyond the server's built-in character validation.
+
+---
+
+### args.txt — Server Arguments File
+
+An alternative to passing arguments via `EXTRA_ARGS` in `.env`. You can put server startup arguments in this file and load it using the `--loadargs` flag. One argument per line, in the same format as command-line arguments.
+
+```
+--no-censor
+--min_spring_version 105.1.1
+```
+
+To use it, set in your `.env`:
+
+```
+EXTRA_ARGS=--loadargs /app/args.txt
+```
+
+Then copy it into the container:
 
 ```bash
-docker compose cp server_email_account.txt uberserver:/app/server_email_account.txt
+docker compose cp args.txt uberserver:/app/args.txt
 docker compose restart uberserver
 ```
 
-Confirm it loaded correctly:
+> In most cases it's simpler to just use `EXTRA_ARGS` in `.env` directly. This file is mainly useful if you have many arguments or want to manage them separately from the environment config.
+
+---
+
+### proxies.txt — Trusted Proxy List
+
+A list of trusted proxy IP addresses, one per line. When a connection comes from a trusted proxy, the server uses the client's local IP (passed through by the proxy) instead of the proxy's IP for ban checks, country detection, and rate limiting. This is useful if you run the server behind a reverse proxy or load balancer.
+
+```
+192.168.1.100
+10.0.0.1
+```
+
+To enable it, set in your `.env`:
+
+```
+EXTRA_ARGS=--proxies /app/proxies.txt
+```
+
+Then copy it into the container:
 
 ```bash
-docker compose exec uberserver grep -i "smtp\|email account" /app/server.log
+docker compose cp proxies.txt uberserver:/app/proxies.txt
+docker compose restart uberserver
 ```
 
-You should see:
+> If this file is not used, all connections are treated as direct and the connecting IP is always used as-is.
 
+---
+
+## Troubleshooting
+
+**Container keeps restarting**
+```bash
+docker compose exec uberserver cat /app/server.log
 ```
-Server email account is no-reply@yourdomain.com
-SMTP relay: mail.authsmtp.com:587
+
+**Can't connect on port 8200**
+- Check containers are running: `docker compose ps`
+- Check firewall: `sudo ufw status`
+- Test locally: `telnet localhost 8200`
+
+**Need to wipe and start fresh** (deletes all data)
+```bash
+docker compose down -v
+docker compose up -d
 ```
 
-> **Note:** The email patch to support external SMTP is already included in the repository. The original code only supported a local mail server on port 25.
-
+**Wipe everything including built images**
+```bash
+docker compose down -v
+docker rmi $(docker images -q)
+docker builder prune -af
+```
