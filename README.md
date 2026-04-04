@@ -232,19 +232,44 @@ Once logged in as an admin, you manage the server through the **ChanServ** bot. 
 
 Duration format: `1h` = one hour, `2d` = two days.
 
+### Access Levels
+
+Every user account has an access level that controls what they can do on the server.
+
+| Level | Description | Inherits from |
+|---|---|---|
+| `fresh` | Newly registered, has not accepted the agreement yet | — |
+| `agreement` | Has accepted the agreement, pending email verification | — |
+| `user` | Normal fully verified user | — |
+| `mod` | Moderator | `user` |
+| `admin` | Administrator | `mod`, `user` |
+| `bot` | Bot account with higher flood/bandwidth limits | — |
+
+`fresh` and `agreement` are transitional states that users pass through automatically during registration. You should not need to set these manually.
+
+Moderators inherit all user permissions plus moderator-only actions. Admins inherit all moderator and user permissions plus admin-only actions.
+
 ### Changing a User's Access Level
 
-Do this directly in the database:
+**Via the database** (recommended for `fresh`, `agreement`, and `bot`):
 
 ```bash
 docker compose exec db mariadb -u uberserver -p uberserver
 ```
 
 ```sql
-UPDATE users SET access = 'moderator' WHERE username = 'someuser';
+UPDATE users SET access = 'mod' WHERE username = 'someuser';
 ```
 
-Valid access levels: `fresh`, `agreement`, `user`, `moderator`, `admin`, `bot`
+**Via the lobby** (admins only, works for `user`, `mod`, `admin`):
+
+Send this command in the lobby server window or as a lobby client admin:
+
+```
+SETACCESS username user|mod|admin
+```
+
+Note: `SETACCESS` only accepts `user`, `mod`, or `admin`. Use the database directly to set `fresh`, `agreement`, or `bot`.
 
 ---
 
