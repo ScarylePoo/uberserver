@@ -1070,8 +1070,8 @@ class VerificationsHandler:
 	def __init__(self, root):
 		self._root = root
 		self.require_verification = (self._root.mail_user != None)	
-		self.mail_identity = "SpringRTS"
-		self.mail_contact_addr = "https://springrts.com"
+		self.mail_identity = getattr(self._root, "mail_identity", "SpringRTS")
+		self.mail_contact_addr = getattr(self._root, "mail_contact_addr", "https://springrts.com")
 		
 	def sess(self):
 		return self._root.session_manager.sess()
@@ -1157,15 +1157,31 @@ class VerificationsHandler:
 	def _send(self, email, code, reason, expiry):
 		sent_from = self._root.mail_user
 		to = email
-		subject = self.mail_identity + " verification code"
-		body = "You are recieving this email because you recently " + reason + ".\r\nYour email verification code is " + str(code) + "\r\n\r\nThis verification code will expire on " + expiry.strftime("%Y-%m-%d") + " at " + expiry.strftime("%H:%M") + " CET."
+		tz_label = getattr(self._root, "mail_tz_label", "UTC")
+		subject = getattr(self._root, "mail_subject", self.mail_identity + " verification code")
+		body_template = getattr(self._root, "mail_body_template", None)
+		if body_template:
+			body = body_template.format(
+				name=self.mail_identity,
+				reason=reason,
+				code=str(code),
+				expiry_date=expiry.strftime('%Y-%m-%d'),
+				expiry_time=expiry.strftime('%H:%M'),
+				tz=tz_label,
+				contact=self.mail_contact_addr,
+				username=reason.split('(username: ')[-1].rstrip(')') if '(username:' in reason else ''
+			)
+		else:
+			body = "You are receiving this email because you recently " + reason + ".\r\nYour email verification code is " + str(code) + "\r\n\r\nThis verification code will expire on " + expiry.strftime("%Y-%m-%d") + " at " + expiry.strftime("%H:%M") + " " + tz_label + "."
 		self._send_email(sent_from, to, subject, body)
+
 
 	def _send_email(self, sent_from, to, subject, body):
 		if not self.active(): #safety
 			logging.error("Attempt to _send_email (subject: %s) failed, verifications handler is inactive" % subject)
 			return
-		body += "\r\n\r\nIf you received this message in error, please contact us at " + self.mail_contact_addr + ". Direct replies to this message will be automatically deleted."
+		if not getattr(self._root, "mail_body_template", None):
+			body += "\r\n\r\nIf you received this message in error, please contact us at " + self.mail_contact_addr + ". Direct replies to this message will be automatically deleted."
 		message = MIMEText(body, 'plain')
 		message['Subject'] = subject
 		message['From'] = self.mail_identity + " <" + sent_from + ">"
@@ -1259,8 +1275,8 @@ class VerificationsHandler:
 	def _send_reset_password_email(self, email, username, password):
 		sent_from = self._root.mail_user
 		to = email
-		subject = self.mail_identity + ' account recovery'
-		body = "You are recieving this email because you recently requested to recover the account <" + username + "> at the " + self.mail_identity + " lobby server.\r\nYour new password is " + password
+		subject = getattr(self._root, 'mail_subject_recovery', self.mail_identity + ' account recovery')
+		body = "You are receiving this email because you recently requested to recover the account <" + username + "> at the " + self.mail_identity + " lobby server.\r\nYour new password is " + password
 		self._send_email(sent_from, to, subject, body)
 
 

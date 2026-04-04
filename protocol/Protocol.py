@@ -875,7 +875,7 @@ class Protocol:
 		client_fromdb = self.clientFromUsername(username, True)
 
 		# verification
-		verif_reason = "registered an account on the SpringRTS lobbyserver (username: %s)" % username
+		verif_reason = "registered an account on the " + self._root.mail_identity + " lobbyserver (username: %s)" % username
 		good, reason = self.verificationdb.check_and_send(client_fromdb.user_id, email, 4, verif_reason)
 		if (not good):
 			client.Send("REGISTRATIONDENIED %s" % ("verification failed: " + reason))
@@ -3058,7 +3058,7 @@ class Protocol:
 		if found and not client.bot:
 			client.Send("CHANGEEMAILREQUESTDENIED another user is already registered to the email address '%s'" % newmail)
 			return
-		reason = "requested to change your email address for the account <%s> on on the SpringRTS lobbyserver" % client.username
+		reason = "requested to change your email address for the account <%s> on the " + self._root.mail_identity + " lobbyserver" % client.username
 		good, reason = self.verificationdb.check_and_send(client.user_id, newmail, 4, reason)
 		if not good:
 			client.Send("CHANGEEMAILREQUESTDENIED " + reason)
@@ -3093,7 +3093,7 @@ class Protocol:
 			client.Send("RESETPASSWORDREQUESTDENIED " + response)
 			return
 		recover_client = self.clientFromID(response, True) # can't assume that the user is logged in, or even genuinely the client
-		reason = "requested to recover your account <" + recover_client.username + "> on the SpringRTS lobbyserver"
+		reason = "requested to recover your account <" + recover_client.username + "> on the " + self._root.mail_identity + " lobbyserver"
 		good, reason = self.verificationdb.check_and_send(recover_client.user_id, email, 8, reason)
 		if not good:
 			client.Send("RESETPASSWORDREQUESTDENIED " + reason)

@@ -325,9 +325,54 @@ your_app_password
 
 ---
 
+### server_verification_message.txt — Verification Email Template
+
+Customises the email sent to users when they register or request a password reset. If this file does not exist, a default SpringRTS-branded email is sent.
+
+The file has 4 header lines followed by the email body template:
+
+```
+line 1: server/community name
+line 2: contact URL
+line 3: email subject line
+line 4: timezone label
+line 5+: email body template (can be as many lines as you like)
+```
+
+**Example:**
+
+```
+Recoil Engine
+https://recoilengine.org
+Recoil Engine - Email Verification
+UTC
+You are receiving this email because you recently {reason}.
+Your email verification code is: {code}
+
+This code will expire on {expiry_date} at {expiry_time} {tz}.
+
+If you received this message in error, please contact us at {contact}.
+Direct replies to this message will be automatically deleted.
+```
+
+**Available placeholders for the body template:**
+
+| Placeholder | Value |
+|---|---|
+| `{name}` | Server/community name (line 1) |
+| `{contact}` | Contact URL (line 2) |
+| `{reason}` | Why the email was sent (e.g. "registered an account on the X lobbyserver") |
+| `{username}` | The username of the registering user |
+| `{code}` | The verification code |
+| `{expiry_date}` | Date the code expires (YYYY-MM-DD) |
+| `{expiry_time}` | Time the code expires (HH:MM) |
+| `{tz}` | Timezone label (line 4) |
+
+---
+
 ### server_iphub_xkey.txt — VPN/Proxy Detection
 
-Contains a single API key from [iphub.info](https://iphub.info). When present, the server checks each registering user's IP against the IPHub API. Users connecting from VPNs, datacenters, or non-residential IPs will have their account activation delayed by 24 hours. This is a useful anti-abuse measure for public servers.
+Contains a single API key from [iphub.info](https://iphub.info). When present, the server checks each registering user's IP against the IPHub API. Users connecting from VPNs, datacenters, or non-residential IPs will have their account activation delayed by 24 hours.
 
 ```
 your_iphub_api_key_here
@@ -335,13 +380,13 @@ your_iphub_api_key_here
 
 Get a free API key at https://iphub.info — the free tier allows 1,000 checks per day.
 
-> If this file is not present, IP checking is disabled and all registrations are processed immediately regardless of IP type.
+> If this file is not present, IP checking is disabled and all registrations are processed immediately.
 
 ---
 
 ### bad_words.txt — Profanity Filter
 
-A list of words to censor in chat. One word per line. The server replaces matched words with `***` in channels where censoring is enabled (`#main` and `#newbies` by default).
+A list of words to censor in chat. One word per line. The server replaces matched words with `***` in channels where censoring is enabled.
 
 You can optionally provide a replacement word by putting it after a space:
 
@@ -349,8 +394,6 @@ You can optionally provide a replacement word by putting it after a space:
 badword
 anotherbadword replacement
 ```
-
-The second example would replace `anotherbadword` with `replacement` instead of `***`.
 
 > If this file is not present, no word censoring is applied.
 
@@ -371,7 +414,7 @@ anotherbadsite.net
 
 ### bad_nicks.txt — Username Blacklist
 
-A list of usernames or username fragments that are not allowed to be registered. One entry per line, lowercase. Useful for blocking offensive names or impersonations of admin accounts.
+A list of usernames or username fragments that are not allowed to be registered. One entry per line, lowercase.
 
 ```
 badusername
@@ -385,7 +428,7 @@ moderator
 
 ### args.txt — Server Arguments File
 
-An alternative to passing arguments via `EXTRA_ARGS` in `.env`. You can put server startup arguments in this file and load it using the `--loadargs` flag. One argument per line, in the same format as command-line arguments.
+An alternative to passing arguments via `EXTRA_ARGS` in `.env`. Put server startup arguments in this file, one per line.
 
 ```
 --no-censor
@@ -405,13 +448,11 @@ docker compose cp args.txt uberserver:/app/args.txt
 docker compose restart uberserver
 ```
 
-> In most cases it's simpler to just use `EXTRA_ARGS` in `.env` directly. This file is mainly useful if you have many arguments or want to manage them separately from the environment config.
-
 ---
 
 ### proxies.txt — Trusted Proxy List
 
-A list of trusted proxy IP addresses, one per line. When a connection comes from a trusted proxy, the server uses the client's local IP (passed through by the proxy) instead of the proxy's IP for ban checks, country detection, and rate limiting. This is useful if you run the server behind a reverse proxy or load balancer.
+A list of trusted proxy IP addresses, one per line. When a connection comes from a trusted proxy, the server uses the client's real IP instead of the proxy's IP for ban checks, country detection, and rate limiting.
 
 ```
 192.168.1.100
@@ -430,8 +471,6 @@ Then copy it into the container:
 docker compose cp proxies.txt uberserver:/app/proxies.txt
 docker compose restart uberserver
 ```
-
-> If this file is not used, all connections are treated as direct and the connecting IP is always used as-is.
 
 ---
 

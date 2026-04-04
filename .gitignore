@@ -13,6 +13,7 @@ xmlrpc.log*
 /server_email_account.txt
 /server_iphub_xkey.txt
 /server_motd.txt
+/server_verification_message.txt
 /test.db
 /deps.zip
 /GeoIP.dat

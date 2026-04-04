@@ -41,6 +41,12 @@ class DataHandler:
 		self.motd = []
 		self.iphub_xkey = None
 		self.mail_user = None		
+		self.mail_identity = 'SpringRTS'
+		self.mail_contact_addr = 'https://springrts.com'
+		self.mail_subject = None
+		self.mail_subject_recovery = None
+		self.mail_body_template = None
+		self.mail_tz_label = 'UTC'
 		self.mail_smtp_host = None
 		self.mail_smtp_port = 587
 		self.mail_smtp_user = None
@@ -452,6 +458,20 @@ class DataHandler:
 				logging.info('SMTP relay: %s:%s' % (self.mail_smtp_host, self.mail_smtp_port))
 		except Exception as e:
 			logging.error('Could not load server_email_account.txt: %s' %(e))
+
+		try:
+			with open('server_verification_message.txt', 'r') as f:
+				file_lines = [l.strip() for l in f.readlines()]
+			if len(file_lines) > 0: self.mail_identity = file_lines[0]
+			if len(file_lines) > 1: self.mail_contact_addr = file_lines[1]
+			if len(file_lines) > 2: self.mail_subject = file_lines[2]
+			if len(file_lines) > 3: self.mail_tz_label = file_lines[3]
+			# remaining lines are the body template
+			if len(file_lines) > 4:
+				self.mail_body_template = '\r\n'.join(file_lines[4:])
+			logging.info('Loaded server_verification_message.txt: identity=%s' % self.mail_identity)
+		except Exception as e:
+			logging.info('No server_verification_message.txt found, using defaults: %s' % e)
 
 		
 		try:
