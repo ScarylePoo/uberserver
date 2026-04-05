@@ -541,6 +541,12 @@ class UsersHandler:
 		dbuser = self.sess().query(User).filter(User.username==username).first()
 		dbuser.password = password
 		self.sess().commit()
+	def set_bot(self, user_id, is_bot):
+		dbuser = self.sess().query(User).filter(User.id==user_id).first()
+		if dbuser:
+			dbuser.bot = 1 if is_bot else 0
+			self.sess().commit()
+
 
 	def end_session(self, user_id):
 		entry = self.sess().query(User).filter(User.id==user_id).first()

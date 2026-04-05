@@ -129,6 +129,35 @@ class ChanServClient(Client):
 			return battle.name
 
 
+
+		if cmd == 'setbot':
+			if not client.isMod():
+				return 'You must be a moderator or admin to set bot flags'
+			username = chan or args
+			if not username:
+				return 'Usage: :setbot username'
+			target = self._root.clientFromUsername(username.strip(), True)
+			if not target:
+				return 'User <%s> not found' % username.strip()
+			self._root.userdb.set_bot(target.user_id, True)
+			if target.username in self._root.usernames:
+				self._root.usernames[target.username].bot = True
+			return '<%s> has been flagged as a bot' % target.username
+
+		if cmd == 'unsetbot':
+			if not client.isMod():
+				return 'You must be a moderator or admin to set bot flags'
+			username = chan or args
+			if not username:
+				return 'Usage: :unsetbot username'
+			target = self._root.clientFromUsername(username.strip(), True)
+			if not target:
+				return 'User <%s> not found' % username.strip()
+			self._root.userdb.set_bot(target.user_id, False)
+			if target.username in self._root.usernames:
+				self._root.usernames[target.username].bot = False
+			return '<%s> bot flag has been removed' % target.username
+
 		if not chan:
 			return "Channel not specified"
 		if chan[0] == '#':

@@ -229,8 +229,12 @@ Once logged in as an admin, you manage the server through the **ChanServ** bot. 
 | `:unban chanName username` | Ops, moderators, founder |
 | `:listbans` | Ops, moderators, founder |
 | `:listmutes` | Ops, moderators, founder |
+| `:setbot username` | Moderators, admins |
+| `:unsetbot username` | Moderators, admins |
 
 Duration format: `1h` = one hour, `2d` = two days.
+
+> `:setbot` and `:unsetbot` must be sent as a PM to ChanServ — they cannot be used inside a channel since they require a username argument.
 
 ### Access Levels
 
@@ -251,7 +255,7 @@ Moderators inherit all user permissions plus moderator-only actions. Admins inhe
 
 ### Changing a User's Access Level
 
-**Via the database** (recommended for `fresh`, `agreement`, and `bot`):
+**Via the database** (recommended for `fresh`, `agreement`):
 
 ```bash
 docker compose exec db mariadb -u uberserver -p uberserver
@@ -269,7 +273,35 @@ Send this command in the lobby server window or as a lobby client admin:
 SETACCESS username user|mod|admin
 ```
 
-Note: `SETACCESS` only accepts `user`, `mod`, or `admin`. Use the database directly to set `fresh`, `agreement`, or `bot`.
+Note: `SETACCESS` only accepts `user`, `mod`, or `admin`. Use the database directly to set `fresh` or `agreement`.
+
+### Bot Accounts
+
+Bot accounts are regular user accounts with a bot flag set. They get significantly higher flood and bandwidth limits, and are shown as bots to connecting clients. The `access` field should be `user` — do **not** set it to `bot`.
+
+**Creating a bot account via the database:**
+
+```bash
+docker compose exec db mariadb -u uberserver -p uberserver
+```
+
+```sql
+INSERT INTO users (username, password, access, register_date, last_login, last_ip, last_agent, last_sys_id, last_mac_id, ingame_time, bot)
+VALUES ('botusername', 'HASH_HERE', 'user', NOW(), NOW(), '127.0.0.1', '', '', '', 0, 1);
+```
+
+Note the `bot = 1` at the end. The `access` field must be `user`, not `bot`.
+
+**Managing bot flags via ChanServ** (mods and admins):
+
+PM ChanServ or type in a registered channel:
+
+```
+:setbot username
+:unsetbot username
+```
+
+`:setbot` sets `bot = 1` on the account. `:unsetbot` removes the bot flag. Both commands work on online and offline users.
 
 ---
 
