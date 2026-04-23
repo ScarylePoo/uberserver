@@ -19,7 +19,8 @@ import Channel
 import Battle
 import BridgedClient
 
-# see https://springrts.com/dl/LobbyProtocol/ProtocolDescription.html#MYSTATUS:client
+# see https://github.com/spring/LobbyProtocol
+# #MYSTATUS:client ( https://github.com/spring/LobbyProtocol#L1798 )
 # max. 8 ranks are possible (rank 0 isn't listed)
 # rank, ingame time in hours
 ranks = (5, 15, 30, 100, 300, 1000, 3000)

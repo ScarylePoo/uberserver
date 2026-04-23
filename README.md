@@ -384,7 +384,7 @@ your_app_password
 
 ### server_verification_message.txt — Verification Email Template
 
-Customises the email sent to users when they register or request a password reset. If this file does not exist, a default SpringRTS-branded email is sent.
+Customises the email sent to users when they register or request a password reset. If this file does not exist, a default Recoil Engine-branded email is sent.
 
 The file has 4 header lines followed by the email body template:
 

@@ -26,11 +26,11 @@ MAGIC_WORDS = "SqueamishOssifrage"
 NUM_SESSION_KEYS = 4
 
 HOST_SERVER = ("localhost", 8200)
-MAIN_SERVER = ("lobby.springrts.com", 8200)
-TEST_SERVER = ("lobby.springrts.com", 7000)
+MAIN_SERVER = ("lobby.recoilengine.org", 8200)
+TEST_SERVER = ("lobby.recoilengine.org", 7000)
 BACKUP_SERVERS = [
-	("lobby1.springlobby.info", 8200),
-	("lobby2.springlobby.info", 8200),
+	("lobby.recoilengine.org", 8200),
+	("lobby.recoilengine.org", 8200),
 ]
 
 ## commands that are allowed to be sent unencrypted

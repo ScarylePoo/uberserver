@@ -23,8 +23,8 @@ CLIENT_PWRD = "KeepItSecretKeepItSafe%02d"
 MAGIC_WORDS = "SqueamishOssifrage"
 
 HOST_SERVER = ("localhost", 8200)
-MAIN_SERVER = ("lobby.springrts.com", 8200)
-TEST_SERVER = ("lobby.springrts.com", 7000)
+MAIN_SERVER = ("lobby.recoilengine.org", 8200)
+TEST_SERVER = ("lobby.recoilengine.org", 7000)
 BACKUP_SERVERS = [
 	("lobby1.springlobby.info", 8200),
 	("lobby2.springlobby.info", 8200),

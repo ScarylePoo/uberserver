@@ -41,8 +41,8 @@ class DataHandler:
 		self.motd = []
 		self.iphub_xkey = None
 		self.mail_user = None		
-		self.mail_identity = 'SpringRTS'
-		self.mail_contact_addr = 'https://springrts.com'
+		self.mail_identity = 'Recoil Engine'
+		self.mail_contact_addr = 'https://recoilengine.org'
 		self.mail_subject = None
 		self.mail_subject_recovery = None
 		self.mail_body_template = None
@@ -692,7 +692,7 @@ class DataHandler:
 	def get_ip_address(self):
 		try:
 			s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-			s.connect(("springrts.com", 80))
+			s.connect(("1.1.1.1", 80))
 			res = s.getsockname()[0]
 			s.close()
 			return res

@@ -1076,8 +1076,8 @@ class VerificationsHandler:
 	def __init__(self, root):
 		self._root = root
 		self.require_verification = (self._root.mail_user != None)	
-		self.mail_identity = getattr(self._root, "mail_identity", "SpringRTS")
-		self.mail_contact_addr = getattr(self._root, "mail_contact_addr", "https://springrts.com")
+		self.mail_identity = getattr(self._root, "mail_identity", "Recoil Engine")
+		self.mail_contact_addr = getattr(self._root, "mail_contact_addr", "https://recoilengine.org")
 		
 	def sess(self):
 		return self._root.session_manager.sess()
@@ -1551,7 +1551,7 @@ if __name__ == '__main__':
 
 	root = root()
 	root.session_manager = session_manager(root, engine)
-	root.mail_user = "no-reply@springrts.com"
+	root.mail_user = "no-reply@recoilengine.org"
 	
 	userdb = UsersHandler(root)
 	channeldb = ChannelsHandler(root)
