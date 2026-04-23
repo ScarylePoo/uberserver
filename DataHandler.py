@@ -705,23 +705,45 @@ class DataHandler:
 			pass
 		return '127.0.0.1'
 
+	# Services to try in order for public IP detection.
+	# Each should return a plain IP address as the response body.
+	IP_DETECTION_SERVICES = [
+		'https://api.ipify.org',
+		'https://ifconfig.me/ip',
+		'https://checkip.amazonaws.com',
+		'https://icanhazip.com',
+		'https://ipecho.net/plain',
+	]
+
 	def detectIp(self):
 		logging.info('Detecting local IP:')
 		local_addr = self.get_ip_address()
 		logging.info(local_addr)
 
 		logging.info('Detecting online IP:')
+		web_addr = None
+		for service in self.IP_DETECTION_SERVICES:
+			try:
+				timeout = socket.getdefaulttimeout()
+				socket.setdefaulttimeout(5)
+				response = urlopen(service).read().decode("utf-8").strip()
+				socket.setdefaulttimeout(timeout)
+				# Validate it looks like an IP address
+				parts = response.split('.')
+				if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+					web_addr = response
+					logging.info('Online IP detected via %s: %s' % (service, web_addr))
+					break
+				else:
+					logging.warning('IP detection service %s returned unexpected response: %s' % (service, response[:50]))
+			except Exception as e:
+				logging.warning('IP detection service %s failed: %s' % (service, str(e)))
+			finally:
+				socket.setdefaulttimeout(socket.getdefaulttimeout())
 
-
-		try:
-			timeout = socket.getdefaulttimeout()
-			socket.setdefaulttimeout(5)
-			web_addr = urlopen('https://springrts.com/lobby/getip.php').read().decode("utf-8")
-			socket.setdefaulttimeout(timeout)
-			logging.info(web_addr)
-		except:
+		if not web_addr:
+			logging.warning('All IP detection services failed, falling back to local IP: %s' % local_addr)
 			web_addr = local_addr
-			logging.info('not online')
 
 		self.local_ip = local_addr
 		self.online_ip = web_addr
