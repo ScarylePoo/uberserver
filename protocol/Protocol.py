@@ -745,8 +745,35 @@ class Protocol:
 		'sends the protocol for adding a battle'
 
 		host = self.clientFromSession(battle.host)
-		if host.ip_address == client.ip_address: # translates the ip to always be compatible with the client
+		# IP translation logic:
+		# 1. If the joining client has the same WAN IP as the host, they are on the same LAN.
+		#    Send the host's local/LAN IP so they can connect directly.
+		# 2. If the host is on the same LAN as the lobby server (host's WAN IP matches the
+		#    lobby server's LAN subnet or the host's ip_address is a private/LAN address),
+		#    and the joining client is on WAN, send the lobby server's public IP instead.
+		#    This fixes dedicated hosts on the same LAN as the lobby server being unreachable
+		#    from external clients. (Feature not in original uberserver - added for LAN hosting)
+		# 3. Otherwise send the host's WAN IP as reported.
+		def _is_private_ip(ip):
+			if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('127.'):
+				return True
+			# 172.16.0.0 - 172.31.255.255 are private, but 172.32+ are public (e.g. T-Mobile)
+			if ip.startswith('172.'):
+				try:
+					second_octet = int(ip.split('.')[1])
+					return 16 <= second_octet <= 31
+				except:
+					return False
+			return False
+
+		if host.ip_address == client.ip_address:
+			# Same WAN IP - both on same LAN, use host's local IP
 			translated_ip = host.local_ip
+		elif _is_private_ip(host.ip_address) and not _is_private_ip(client.ip_address):
+			# Host is on a private/LAN IP but the joining client is on WAN.
+			# The host must be reachable via the lobby server's public IP (port forwarded).
+			# Send the lobby server's public IP so external clients can reach the host.
+			translated_ip = self._root.online_ip
 		else:
 			translated_ip = host.ip_address
 
