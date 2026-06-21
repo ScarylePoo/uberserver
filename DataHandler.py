@@ -310,6 +310,10 @@ class DataHandler:
 		print('      { Uses SQL database at the specified sqlurl for user, channel, and ban storage. }')
 		print('  -c, --no-censor')
 		print('      { Disables censoring of #main, #newbies, and usernames (default is to censor) }')
+		print('  --poolsize N')
+		print('      { Size of the SQL connection pool (default is 50, ignored for sqlite). }')
+		print('      { Rough guide: each pooled connection uses ~2-5MB RAM. Raise on well-resourced }')
+		print('      { servers, lower on constrained ones. }')
 		print('  --proxies /path/to/proxies.txt')
 		print('     { Path to proxies.txt, for trusting proxies to pass real IP through local IP }')
 		print('   -a --agreement /path/to/agreement.txt')
@@ -392,6 +396,14 @@ class DataHandler:
 					print('Error specifying SQL URL')
 			elif arg in ['c', 'no-censor']:
 				self.censor = False
+			elif arg == 'poolsize':
+				try:
+					poolsize = int(argp[0])
+					if poolsize < 1:
+						raise ValueError('pool size must be >= 1')
+					self.pool_size = poolsize
+				except (IndexError, ValueError) as e:
+					print('Invalid --poolsize specification, using default %d: %s' % (self.pool_size, e))
 			elif arg in ['a', 'agreement']:
 				try:
 					self.argeementfile = argp[0]
