@@ -222,7 +222,12 @@ class Protocol:
 
 		self.restricted = restricted
 		self.restricted_list = restricted_list
-		
+
+		# per-command argspec cache: command -> (total_args, optional_args).
+		# getfullargspec is expensive and the result never changes for a given
+		# handler, so we memoise it lazily on first dispatch (see get_function_args).
+		self._argspec_cache = {}
+
 		self.ipRegex = r"^([01]?\d\d?|2[0-4]\d|25[0-5])\.([01]?\d\d?|2[0-4]\d|25[0-5])\.([01]?\d\d?|2[0-4]\d|25[0-5])\.([01]?\d\d?|2[0-4]\d|25[0-5])$"
 		self.ipRegex_compiled = re.compile(self.ipRegex)
 		
@@ -321,18 +326,21 @@ class Protocol:
 
 
 	def get_function_args(self, client, command, function, numspaces, args):
-		function_info = inspect.getfullargspec(function)
-		total_args = len(function_info[0]) - 2
+		# total_args (handler args minus self+client) and optional_args (those
+		# with defaults) are fixed per handler, so compute once and memoise.
+		spec = self._argspec_cache.get(command)
+		if spec is None:
+			function_info = inspect.getfullargspec(function)
+			total_args = len(function_info[0]) - 2
+			optional_args = len(function_info[3]) if function_info[3] else 0
+			spec = (total_args, optional_args)
+			self._argspec_cache[command] = spec
+		total_args, optional_args = spec
 
 		# if there are no arguments, just call the function
 		# with client as its only arg: *([client]) = client
 		if (total_args <= 0):
 			return True, []
-
-		# check for optional arguments
-		optional_args = 0
-		if function_info[3]:
-			optional_args = len(function_info[3])
 
 		# check if we've got enough words for filling the required args
 		required_args = total_args - optional_args

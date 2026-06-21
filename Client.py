@@ -56,7 +56,7 @@ class Client():
 
 		# server<->client comms
 		self.buffersend = False # if True, write all sends to a buffer (must not be used when a client is logging in but didn't yet receive full server state!)
-		self.buffer = ""
+		self.buffer = [] # list of message strings (incl. trailing newline); joined once in flushBuffer
 		self.msg_id = ''
 		self.msg_sendbuffer = []
 		self.sendingmessage = ''
@@ -222,20 +222,27 @@ class Client():
 		self._root.outbound_command_stats[command] = self._root.outbound_command_stats.get(command, 0) + 1
 
 		#logging.info("> [" + self.username + " " + str(self.session_id) + "] " + data.strip()) # uncomment for debugging
-		
-		self.transport.write(data.encode("utf-8") + b"\n")
+
+		# while buffersend is on (the login state-dump), accumulate into the buffer
+		# and let flushBuffer emit it in a single transport.write. Stats are counted
+		# above either way, and no msg_id is prepended, so the bytes are identical to
+		# sending each message directly - only the syscall batching differs.
+		if self.buffersend:
+			self.buffer.append(data + "\n")
+		else:
+			self.transport.write(data.encode("utf-8") + b"\n")
 
 	def Send(self, data):
 		if self.msg_id:
 			data = self.msg_id + data
 		if self.buffersend:
-			self.buffer += data + "\n"
+			self.buffer.append(data + "\n")
 		else:
 			self.RealSend(data)
 
 	def flushBuffer(self):
-		self.transport.write(self.buffer.encode("utf-8"))
-		self.buffer = ""
+		self.transport.write("".join(self.buffer).encode("utf-8"))
+		self.buffer = []
 		self.buffersend = False
 
 	def isAdmin(self):
