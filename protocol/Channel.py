@@ -22,6 +22,10 @@ class Channel():
 		# non-db fields
 		self.operators = set() #user_ids
 		self.users = set() # session_ids
+		# 2.1: client objects mirroring self.users, kept in lockstep in addUser/removeUser.
+		# Lets broadcast() iterate this channel's members directly instead of doing a
+		# clientFromSession() dict lookup per recipient per message.
+		self.user_clients = set() # client objects
 		self.bridged_users = set() #bridged_ids
 		
 		self.topic_username = ''
@@ -68,6 +72,7 @@ class Channel():
 		if client.session_id in self.users:
 			return
 		self.users.add(client.session_id)
+		self.user_clients.add(client)
 		client.channels.add(self.name)
 		if not client.static:
 			self.recordUse()
@@ -117,6 +122,7 @@ class Channel():
 		else:
 			self.broadcast('LEFT %s %s' % (self.name, client.username), set(), flag)
 		self.users.remove(client.session_id)
+		self.user_clients.discard(client)
 		if not client.static:
 			self.recordUse()
 

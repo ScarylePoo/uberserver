@@ -213,12 +213,15 @@ class Client():
 	##
 	## send data to client
 	##
-	def RealSend(self, data):
+	def RealSend(self, data, command=None):
 		if not data:
 			return
 
-		raw_msg  = data[data.find(" ")+1:] if data.startswith('#') else data
-		command = raw_msg[:raw_msg.find(" ")] if " " in raw_msg else raw_msg
+		# 2.1: command may be precomputed by the broadcast path (same token for every
+		# recipient of one message). Only fall back to deriving it per-send otherwise.
+		if command is None:
+			raw_msg  = data[data.find(" ")+1:] if data.startswith('#') else data
+			command = raw_msg[:raw_msg.find(" ")] if " " in raw_msg else raw_msg
 		self._root.outbound_command_stats[command] = self._root.outbound_command_stats.get(command, 0) + 1
 
 		#logging.info("> [" + self.username + " " + str(self.session_id) + "] " + data.strip()) # uncomment for debugging
@@ -232,13 +235,13 @@ class Client():
 		else:
 			self.transport.write(data.encode("utf-8") + b"\n")
 
-	def Send(self, data):
+	def Send(self, data, command=None):
 		if self.msg_id:
 			data = self.msg_id + data
 		if self.buffersend:
 			self.buffer.append(data + "\n")
 		else:
-			self.RealSend(data)
+			self.RealSend(data, command)
 
 	def flushBuffer(self):
 		self.transport.write("".join(self.buffer).encode("utf-8"))
