@@ -70,6 +70,17 @@ class DataHandler:
 		self.trusted_proxyfile = None
 
 		self.pool_size = 50
+
+		# 2.3: bound per-client write buffers (slow-loris / stalled-reader DoS guard).
+		# transport.write() queues unsent data in memory with no bound, so a client
+		# that stops reading lets its server-side buffer grow without limit. We register
+		# each connection as a streaming producer: when its send buffer exceeds the
+		# high-water mark Twisted calls pauseProducing(); if it never drains (resumeProducing)
+		# within the grace period the client is dropped. A healthy client - including one
+		# receiving a large login state-dump - drains in milliseconds and is never affected.
+		self.write_buffer_highwater = 256 * 1024  # bytes queued before backpressure trips
+		self.write_buffer_grace = 30              # seconds a client may stay backed up before disconnect
+
 		self.sqlurl = 'sqlite:///server.db'
 		self.nextbattle = 0
 		self.SayHooks = __import__('SayHooks')
