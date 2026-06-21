@@ -14,6 +14,7 @@ from protocol import Protocol, Channel, Battle
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from twisted.internet import ssl
+from twisted.internet.threads import deferToThread
 
 separator = '-'*60
 
@@ -684,6 +685,45 @@ class DataHandler:
 			except:
 				logging.error(traceback.format_exc())
 				self.session_manager.rollback_guard()
+			finally:
+				self.session_manager.close_guard()
+
+	def defer_db(self, fn, *args):
+		# 3.1: run a synchronous DB function in the reactor thread pool so it does not
+		# block the event loop. The returned Deferred fires its callbacks back on the
+		# reactor thread (Twisted guarantees this), so callbacks may safely mutate shared
+		# state; fn itself runs on a worker thread and must do PURE DB I/O returning plain
+		# data (no shared-dict mutation, no live ORM rows handed back).
+		return deferToThread(self._run_db, fn, args)
+
+	# transient InnoDB/MariaDB errors that mean "the transaction lost a race; just retry":
+	# 1213 deadlock, 1205 lock-wait timeout, 1020 record-changed-since-last-read. These
+	# only arise when two transactions touch the same row concurrently (e.g. the same user
+	# logging in on two connections at once) - distinct rows never contend.
+	_db_retry_errnos = (1213, 1205, 1020)
+	_db_max_attempts = 4
+
+	def _run_db(self, fn, args):
+		# runs on a worker thread. scoped_session gives this thread its own Session, so we
+		# own its commit/close here (the dataReceived guards only cover the reactor thread).
+		# Retries the whole unit on transient serialization errors; each attempt starts from
+		# a fresh session (close_guard removes the thread-local one), so fn re-reads the row.
+		for attempt in range(self._db_max_attempts):
+			try:
+				result = fn(*args)
+				self.session_manager.commit_guard()
+				return result
+			except Exception as e:
+				self.session_manager.rollback_guard()
+				errno = None
+				orig = getattr(e, 'orig', None)
+				if orig is not None and getattr(orig, 'args', None):
+					errno = orig.args[0]
+				if errno in self._db_retry_errnos and attempt < self._db_max_attempts - 1:
+					self.session_manager.close_guard()
+					time.sleep(0.01 * (attempt + 1))
+					continue
+				raise
 			finally:
 				self.session_manager.close_guard()
 

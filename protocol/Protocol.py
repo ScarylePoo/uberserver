@@ -1010,22 +1010,33 @@ class Protocol:
 			self.out_DENIED(client, username, "Invalid username: '%s'" % username)
 			return
 
-		good, reason = self.userdb.check_login_user(username, password)
-		if not good:
-			self.out_DENIED(client, username, reason)
+		# 3.1: run the auth + ban check off the reactor thread, then continue in
+		# _login_checked once the DB worker returns. The remaining memory-only checks and
+		# the denial ordering are applied in the callback, preserving the original flow.
+		d = self._root.defer_db(self.userdb.precheck_login, username, password, client.ip_address)
+		d.addCallback(self._login_checked, client, username, local_ip, sentence_args)
+		d.addErrback(self._login_failed, client, username)
+
+	def _login_checked(self, result, client, username, local_ip, sentence_args):
+		# reactor-thread callback after precheck_login (result is plain data). Applies the
+		# same denial ordering as the original linear flow, then defers the login write.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
+		login_ok, login_reason, banned, ban_reason = result
+		if not login_ok:
+			self.out_DENIED(client, username, login_reason)
 			return
-		
+
 		delay, reason = self._check_delayed_registration(client)
 		if delay:
 			self.out_DENIED(client, username, reason)
 			return
- 		
-		banned, reason, dbuser = self.userdb.check_banned(username, client.ip_address)
+
 		if banned:
-			assert (type(reason) == str)
-			self.out_DENIED(client, username, reason)
+			assert (type(ban_reason) == str)
+			self.out_DENIED(client, username, ban_reason)
 			return
-			
+
 		if self.SayHooks.isNasty(sentence_args):
 			self.out_DENIED(client, username, "Invalid sentence args")
 			return
@@ -1037,18 +1048,46 @@ class Protocol:
 			logging.warning("Invalid login sentence '%s' from <%s>" % (sentence_args, username))
 			self.out_DENIED(client, username, 'Invalid sentence format, please update your lobby client.')
 			return
-		else: 
+		else:
 			agent, last_id, compat_flags = sentence_args.split('\t',2)
 			if " " in last_id:
-				last_mac_id, last_sys_id = last_id.split(" ") 
+				last_mac_id, last_sys_id = last_id.split(" ")
 			else:
-				last_mac_id = last_id 
+				last_mac_id = last_id
 				last_sys_id = "0" # backwards compat for SL<0.269
 			for flag in compat_flags.split(' '):
 				client.compat.add(flag)
-		
-		# login checks complete
-		dbuser = self.userdb.login_user(dbuser, client.ip_address, agent, last_sys_id, last_mac_id, local_ip, client.country_code)
+
+		# login checks complete; write the login record off the reactor thread.
+		d = self._root.defer_db(self.userdb.do_login, username, client.ip_address, agent, last_sys_id, last_mac_id, local_ip, client.country_code)
+		d.addCallback(self._login_finish, client, username, agent, local_ip)
+		d.addErrback(self._login_failed, client, username)
+
+	def _login_finish(self, dbuser, client, username, agent, local_ip):
+		# reactor-thread callback after do_login. dbuser is a plain OfflineClient snapshot,
+		# or None if the account vanished between the auth check and the write.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
+		if dbuser is None:
+			self.out_DENIED(client, username, 'Invalid username or password')
+			return
+		# This callback runs outside dataReceived's per-request session guard, but the
+		# work below can still touch the DB on the reactor thread (_SendLoginInfo's
+		# get_ignored_user_ids, and the moderator in_JOIN). Bracket it the same way
+		# dataReceived does so the reactor session is committed/closed and never leaks.
+		try:
+			self._login_finish_now(dbuser, client, username, agent, local_ip)
+			self._root.session_manager.commit_guard()
+		except:
+			logging.error(traceback.format_exc())
+			self._root.session_manager.rollback_guard()
+		finally:
+			self._root.session_manager.close_guard()
+
+	def _login_finish_now(self, dbuser, client, username, agent, local_ip):
+		# invalidate the offline-user cache here, on the reactor thread (the worker must
+		# not mutate shared state)
+		self.userdb.invalidate_user_cache(dbuser.id, dbuser.username)
 
 		# update local client fields from DB User values
 		client.access = dbuser.access
@@ -1066,7 +1105,7 @@ class Protocol:
 		client.ingame_time = dbuser.ingame_time
 		client.email = dbuser.email
 		client.agent = agent
-	
+
 		if (client.access == 'agreement'):
 			logging.info('[%s] Sent user <%s> the terms of service on session.' % (client.session_id, dbuser.username))
 			if self.verificationdb.active():
@@ -1076,24 +1115,31 @@ class Protocol:
 				client.Send("AGREEMENT %s" %(line))
 			client.Send('AGREEMENTEND')
 			return
-		
+
 		client.local_ip = local_ip
 		if local_ip.startswith('127.') or not self._validateIP(local_ip):
 			client.local_ip = client.ip_address
 
 		if client.ip_address in self._root.trusted_proxies:
 			client.setFlagByIP(local_ip, False)
-	
-		try:
-			assert(username == client.username)
-			assert(not client.user_id in self._root.user_ids)
-			assert(not client.username in self._root.usernames)
-		except Exception as e:
-			logging.error("Exception from LOGIN asserts: %s %s %d" % (username, client.username, client.user_id))
-			logging.error(traceback.format_exc())
-		
+
+		# re-check uniqueness now: usernames/user_ids may have changed during the async DB
+		# hops. This is the atomicity guarantee against two concurrent logins of the same
+		# account - it runs on the reactor thread, so no lock is needed. (The original code
+		# only asserted-and-logged here; we now actually reject the duplicate.)
+		if client.username in self._root.usernames or client.user_id in self._root.user_ids:
+			self.out_DENIED(client, username, 'Already logged in.')
+			return
+
 		self._root.client_LoginStats(client)
 		self._SendLoginInfo(client)
+
+	def _login_failed(self, failure, client, username):
+		# reactor-thread errback: a DB error during login. Log it and tell the client
+		# rather than leaving the connection hanging.
+		logging.error("LOGIN DB error for <%s>: %s" % (username, failure.getTraceback()))
+		if client.session_id in self._root.clients:
+			self.out_DENIED(client, username, 'Login failed due to a server error, please try again.')
 
 	def _SendLoginInfo(self, client):
 		self._calc_status(client, 0)

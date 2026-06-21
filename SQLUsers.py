@@ -597,6 +597,45 @@ class UsersHandler:
 		self.invalidate_user_cache(uid, uname)
 		return dbuser
 
+	# --- 3.1 async-login workers -------------------------------------------------
+	# precheck_login and do_login run on a deferToThread worker thread. They do PURE
+	# DB I/O and return plain data (tuples / an OfflineClient snapshot) so the reactor
+	# callback never touches an ORM row bound to the worker's session. They must NOT
+	# mutate shared in-memory state (incl. the user cache) - the reactor callback does
+	# that.
+
+	def precheck_login(self, username, password, ip):
+		# auth + ban check, mirroring the in_LOGIN_now order: check_login_user first,
+		# and only check the ban if the credentials are valid (matching the original
+		# control flow, where a failed credential check returns before the ban query).
+		# Returns plain values; the live User row from check_banned stays in this thread.
+		login_ok, login_reason = self.check_login_user(username, password)
+		banned, ban_reason = False, ""
+		if login_ok:
+			banned, ban_reason, _dbuser = self.check_banned(username, ip)
+		return login_ok, login_reason, banned, ban_reason
+
+	def do_login(self, username, ip, agent, last_sys_id, last_mac_id, local_ip, country):
+		# write the login: re-load the user (the precheck row belonged to another
+		# thread/session and cannot cross threads), update last_* fields, append the
+		# Login record, commit, and return a plain OfflineClient snapshot. Returns None
+		# if the user vanished (rename/delete) between precheck and here. Cache
+		# invalidation is left to the reactor callback (shared-state mutation).
+		dbuser = self.sess().query(User).filter(User.username == username).first()
+		if not dbuser:
+			return None
+		now = datetime.now()
+		dbuser.logins.append(Login(now, dbuser.id, ip, agent, last_sys_id, last_mac_id, local_ip, country))
+		dbuser.last_ip = ip
+		dbuser.last_agent = agent
+		dbuser.last_sys_id = last_sys_id
+		dbuser.last_mac_id = last_mac_id
+		dbuser.last_login = now
+		# snapshot while the row is attached and current, before commit expires it
+		snapshot = OfflineClient(dbuser)
+		self.sess().commit()
+		return snapshot
+
 	def set_user_password(self, username, password):
 		dbuser = self.sess().query(User).filter(User.username==username).first()
 		dbuser.password = password
@@ -1003,6 +1042,11 @@ class BansHandler:
 		# CachedBan snapshot (or None) with a short TTL, so a newly-issued ban still
 		# takes effect within the TTL even if no flush reached us, and every ban
 		# add/remove flushes the cache immediately for instant effect.
+		# 3.1: since login moved off the reactor thread, check_ban (and so this dict) is
+		# now also read/written from deferToThread worker threads. No lock is used: dict
+		# get/set are atomic under the GIL (as the codebase already relies on elsewhere,
+		# e.g. nonres_registrations), and the cache is explicitly staleness-tolerant, so a
+		# racing flush/write only costs a redundant query or a sub-TTL stale entry.
 		self._ban_cache_ttl = 300  # seconds
 		self._ban_cache = {}       # (user_id, ip, email) -> (CachedBan|None, expiry)
 
