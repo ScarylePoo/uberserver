@@ -997,11 +997,11 @@ class Protocol:
 			self.out_DENIED(client, username, reason)
 			return
  		
-		banned, reason = self.userdb.check_banned(username, client.ip_address)
+		banned, reason, dbuser = self.userdb.check_banned(username, client.ip_address)
 		if banned:
 			assert (type(reason) == str)
 			self.out_DENIED(client, username, reason)
-			return			
+			return
 			
 		if self.SayHooks.isNasty(sentence_args):
 			self.out_DENIED(client, username, "Invalid sentence args")
@@ -1025,7 +1025,7 @@ class Protocol:
 				client.compat.add(flag)
 		
 		# login checks complete
-		dbuser = self.userdb.login_user(username, password, client.ip_address, agent, last_sys_id, last_mac_id, local_ip, client.country_code)			
+		dbuser = self.userdb.login_user(dbuser, client.ip_address, agent, last_sys_id, last_mac_id, local_ip, client.country_code)
 
 		# update local client fields from DB User values
 		client.access = dbuser.access
