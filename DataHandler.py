@@ -1,4 +1,5 @@
 import time, sys, os, socket
+import collections
 
 import subprocess
 import traceback
@@ -110,6 +111,13 @@ class DataHandler:
 		self.bridged_locations = {} #location->bridge_user_id
 		self.bridged_ids = {} #bridged_id->bridgedClient
 		self.bridged_usernames = {} #bridgeUsername->bridgedClient
+
+		# 2.2: login queue - smooths login storms (server restart, scheduled events) so
+		# concurrent logins don't all hit the DB at once. Logins beyond login_drain_rate
+		# per second are queued FIFO and drained by drain_login_queue() (a 1s LoopingCall).
+		self.login_queue = collections.deque() # (client, login_args) awaiting login under load
+		self.login_drain_rate = 10             # max logins processed per second
+		self.logins_this_second = 0            # budget shared by inline + drained logins; reset each second
 
 		# rate limits
 		self.nonres_registrations = set() #user_id
@@ -649,6 +657,26 @@ class DataHandler:
 		finally:
 			self.session_manager.close_guard()
 	
+	def drain_login_queue(self):
+		# 2.2: reset the per-second login budget, then process queued logins up to the
+		# drain rate. Runs on the reactor thread (1s LoopingCall) so it shares login_queue
+		# / logins_this_second with in_LOGIN without locking. Each login gets its own
+		# session commit/rollback/close, mirroring the per-request guards in dataReceived.
+		self.logins_this_second = 0
+		while self.login_queue and self.logins_this_second < self.login_drain_rate:
+			client, args = self.login_queue.popleft()
+			if client.session_id not in self.clients:
+				continue # client disconnected while queued
+			self.logins_this_second += 1
+			try:
+				self.protocol.in_LOGIN_now(client, *args)
+				self.session_manager.commit_guard()
+			except:
+				logging.error(traceback.format_exc())
+				self.session_manager.rollback_guard()
+			finally:
+				self.session_manager.close_guard()
+
 	def decrement_recent_registrations(self):
 		self.decrement_dict(self.recent_registrations)
 

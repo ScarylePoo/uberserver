@@ -61,6 +61,8 @@ try:
 	
 	event_loop = task.LoopingCall(_root.channel_mute_ban_timeout)
 	event_loop.start(1)
+	login_queue_loop = task.LoopingCall(_root.drain_login_queue)
+	login_queue_loop.start(1)
 	recent_registration_loop = task.LoopingCall(_root.decrement_recent_registrations)
 	recent_registration_loop.start(60*20)
 	recent_rename_loop = task.LoopingCall(_root.decrement_recent_renames)

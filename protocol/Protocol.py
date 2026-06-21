@@ -965,6 +965,21 @@ class Protocol:
 
 	def in_LOGIN(self, client, username, password, cpu='0', local_ip='', sentence_args=''):
 		'''
+		2.2: login-queue gate. Under a login storm, defer this login into a FIFO queue
+		drained at _root.login_drain_rate/sec by DataHandler.drain_login_queue(), and tell
+		the client it is queued. Otherwise spend a slot from the per-second budget and log
+		in immediately. The actual work lives in in_LOGIN_now(); this wrapper keeps the same
+		signature so command dispatch (which reflects on the signature) is unchanged.
+		'''
+		if self._root.login_queue or self._root.logins_this_second >= self._root.login_drain_rate:
+			self._root.login_queue.append((client, (username, password, cpu, local_ip, sentence_args)))
+			client.Send('SERVERMSG The server is busy; you are number %d in the login queue, please wait...' % len(self._root.login_queue))
+			return
+		self._root.logins_this_second += 1
+		self.in_LOGIN_now(client, username, password, cpu, local_ip, sentence_args)
+
+	def in_LOGIN_now(self, client, username, password, cpu='0', local_ip='', sentence_args=''):
+		'''
 		Attempt to login the active client.
 
 		@required.str username: Username
