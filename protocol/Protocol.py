@@ -1610,15 +1610,39 @@ class Protocol:
 		client.Send('UNIGNORE userName=%s' % (username))
 
 	def in_IGNORELIST(self, client):
-		client.Send('IGNORELISTBEGIN')
-		for (userId, reason) in self.userdb.get_ignore_list(client.user_id):
-			ignoredClient = self.clientFromID(userId, True)
-			username = ignoredClient.username
-			if reason:
-				client.Send('IGNORELIST userName=%s\treason=%s' % (username, reason))
-			else:
-				client.Send('IGNORELIST userName=%s' % (username))
-		client.Send('IGNORELISTEND')
+		# 3.1: read the ignore list off the reactor thread, then format + send in
+		# _ignorelist_send once the worker returns plain [(ignored_user_id, reason), ...].
+		d = self._root.defer_db(self.userdb.get_ignore_list, client.user_id)
+		d.addCallback(self._ignorelist_send, client)
+		d.addErrback(self._social_list_failed, client, "IGNORELIST")
+
+	def _ignorelist_send(self, entries, client):
+		# reactor-thread callback. clientFromID may do a reactor-side DB read on an
+		# offline-cache miss, so bracket the reactor session like _login_finish does.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
+		try:
+			client.Send('IGNORELISTBEGIN')
+			for (userId, reason) in entries:
+				ignoredClient = self.clientFromID(userId, True)
+				username = ignoredClient.username
+				if reason:
+					client.Send('IGNORELIST userName=%s\treason=%s' % (username, reason))
+				else:
+					client.Send('IGNORELIST userName=%s' % (username))
+			client.Send('IGNORELISTEND')
+			self._root.session_manager.commit_guard()
+		except:
+			logging.error(traceback.format_exc())
+			self._root.session_manager.rollback_guard()
+		finally:
+			self._root.session_manager.close_guard()
+
+	def _social_list_failed(self, failure, client, cmd):
+		# reactor-thread errback shared by the social list reads: a DB error fetching the
+		# list. Log it loudly; these commands have no protocol-level failure reply, so the
+		# client simply receives no list (equivalent to an empty result).
+		logging.error("%s DB error for <%s>: %s" % (cmd, getattr(client, 'username', '?'), failure.getTraceback()))
 
 	# FIXME: there is currently no limit to the number of friend requests one user can send
 	def in_FRIENDREQUEST(self, client, tags):
@@ -1706,23 +1730,55 @@ class Protocol:
 			friendRequestClient.Send('UNFRIEND userName=%s' % client.username)
 
 	def in_FRIENDREQUESTLIST(self, client):
-		client.Send('FRIENDREQUESTLISTBEGIN')
-		for (userId, msg) in self.userdb.get_friend_request_list(client.user_id):
-			friendRequestClient = self.clientFromID(userId, True)
-			username = friendRequestClient.username
-			if msg:
-				client.Send('FRIENDREQUESTLIST userName=%s\tmsg=%s' % (username, msg))
-			else:
-				client.Send('FRIENDREQUESTLIST userName=%s' % (username))
-		client.Send('FRIENDREQUESTLISTEND')
+		# 3.1: read off the reactor thread; worker returns plain [(user_id, msg), ...].
+		d = self._root.defer_db(self.userdb.get_friend_request_list, client.user_id)
+		d.addCallback(self._friendrequestlist_send, client)
+		d.addErrback(self._social_list_failed, client, "FRIENDREQUESTLIST")
+
+	def _friendrequestlist_send(self, entries, client):
+		# reactor-thread callback; bracket the session because clientFromID may read the DB.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
+		try:
+			client.Send('FRIENDREQUESTLISTBEGIN')
+			for (userId, msg) in entries:
+				friendRequestClient = self.clientFromID(userId, True)
+				username = friendRequestClient.username
+				if msg:
+					client.Send('FRIENDREQUESTLIST userName=%s\tmsg=%s' % (username, msg))
+				else:
+					client.Send('FRIENDREQUESTLIST userName=%s' % (username))
+			client.Send('FRIENDREQUESTLISTEND')
+			self._root.session_manager.commit_guard()
+		except:
+			logging.error(traceback.format_exc())
+			self._root.session_manager.rollback_guard()
+		finally:
+			self._root.session_manager.close_guard()
 
 	def in_FRIENDLIST(self, client):
-		client.Send('FRIENDLISTBEGIN')
-		for userId in self.userdb.get_friend_user_ids(client.user_id):
-			friendClient = self.clientFromID(userId, True)
-			username = friendClient.username
-			client.Send('FRIENDLIST userName=%s' % (username))
-		client.Send('FRIENDLISTEND')
+		# 3.1: read off the reactor thread; worker returns plain [user_id, ...].
+		d = self._root.defer_db(self.userdb.get_friend_user_ids, client.user_id)
+		d.addCallback(self._friendlist_send, client)
+		d.addErrback(self._social_list_failed, client, "FRIENDLIST")
+
+	def _friendlist_send(self, userIds, client):
+		# reactor-thread callback; bracket the session because clientFromID may read the DB.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
+		try:
+			client.Send('FRIENDLISTBEGIN')
+			for userId in userIds:
+				friendClient = self.clientFromID(userId, True)
+				username = friendClient.username
+				client.Send('FRIENDLIST userName=%s' % (username))
+			client.Send('FRIENDLISTEND')
+			self._root.session_manager.commit_guard()
+		except:
+			logging.error(traceback.format_exc())
+			self._root.session_manager.rollback_guard()
+		finally:
+			self._root.session_manager.close_guard()
 
 
 	def in_JOIN(self, client, chan, key=None):
