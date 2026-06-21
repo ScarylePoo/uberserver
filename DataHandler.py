@@ -72,6 +72,12 @@ class DataHandler:
 
 		self.pool_size = 50
 
+		# 3.1: max concurrent off-reactor DB worker threads (deferToThread thread pool).
+		# Each worker needs its own DB connection, so this is clamped to pool_size below.
+		# Forced to 1 for sqlite (which cannot do real concurrency). Default matches
+		# Twisted's own default reactor thread pool size.
+		self.max_threads = 10
+
 		# 2.3: bound per-client write buffers (slow-loris / stalled-reader DoS guard).
 		# transport.write() queues unsent data in memory with no bound, so a client
 		# that stops reading lets its server-side buffer grow without limit. We register
@@ -163,6 +169,10 @@ class DataHandler:
 			from sqlalchemy import event
 			event.listen(self.engine, 'connect', _fk_pragma_on_connect)
 		else:
+			# 3.1: each DB worker thread holds its own pooled connection, so never run
+			# more workers than the pool can serve.
+			if self.max_threads > self.pool_size:
+				self.max_threads = self.pool_size
 			self.engine = sqlalchemy.create_engine(self.sqlurl, pool_size=self.pool_size, pool_recycle=3600)
 
 		self.session_manager = SQLUsers.session_manager(self, self.engine)

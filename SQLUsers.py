@@ -14,7 +14,7 @@ import _thread as thread
 	
 try:
 	from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, ForeignKey, Boolean, Text, DateTime, ForeignKeyConstraint, UniqueConstraint
-	from sqlalchemy.orm import mapper, sessionmaker, relation
+	from sqlalchemy.orm import mapper, sessionmaker, relation, scoped_session
 	from sqlalchemy.exc import IntegrityError
 except ImportError as e:
 	print("ERROR: sqlalchemy isn't installed: " + str(e))
@@ -428,29 +428,32 @@ mapper(MinSpringVersion, min_spring_version_table)
 ##########################################
 
 class session_manager():
-	# on-demand sessionmaker
+	# on-demand, thread-local sessionmaker (Phase 3.1).
+	# scoped_session gives each thread its own Session keyed by thread id, so DB work
+	# run off the reactor thread via deferToThread cannot share a Session (which is not
+	# thread-safe). On the single reactor thread this is behaviourally identical to the
+	# previous single-shared-session model: lazily created, committed/closed per request
+	# by the guards below (called from dataReceived / the LoopingCalls).
 	def __init__(self, root, engine):
 		self._root = root
 		metadata.create_all(engine)
-		self.sessionmaker = sessionmaker(bind=engine, autoflush=True)
-		self.session = None
-	
+		self.sessionmaker = scoped_session(sessionmaker(bind=engine, autoflush=True))
+
 	def sess(self):
-		if not self.session:
-			self.session = self.sessionmaker()
-		return self.session
-		
-	# guarded access
+		# returns this thread's session, creating it on first use
+		return self.sessionmaker()
+
+	# guarded access. registry.has() keeps the old "don't create a session just to
+	# commit nothing" no-op semantics; these only ever touch the calling thread's session.
 	def commit_guard(self):
-		if self.session:
-			self.session.commit()
+		if self.sessionmaker.registry.has():
+			self.sessionmaker.commit()
 	def rollback_guard(self):
-		if self.session:
-			self.session.rollback()
+		if self.sessionmaker.registry.has():
+			self.sessionmaker.rollback()
 	def close_guard(self):
-		if self.session:
-			self.session.close()
-			self.session = None
+		if self.sessionmaker.registry.has():
+			self.sessionmaker.remove()
 
 ##########################################
 			
