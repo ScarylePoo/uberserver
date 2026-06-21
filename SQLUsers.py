@@ -728,7 +728,7 @@ class UsersHandler:
 		else: return False, 'User not found in database'
 
 	def get_account_access(self, username):
-		entry = self.session.query(User).filter(User.username==username).first()
+		entry = self.sess().query(User).filter(User.username==username).first()
 		if entry:
 			return True, entry.access
 		else: return False, 'User not found in database'
