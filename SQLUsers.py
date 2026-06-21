@@ -476,18 +476,67 @@ class UsersHandler:
 	def __init__(self, root):
 		self._root = root
 
+		# 1.2: bounded TTL cache of offline-user lookups. Stores positive hits only
+		# (OfflineClient snapshots) keyed separately by username and by id. This only
+		# ever serves *offline* lookups: callers go through DataHandler which checks the
+		# online dicts first, and login/auth (check_login_user, login_user) query User
+		# directly and never touch this cache, so a stale entry can't bypass auth.
+		# Invalidated precisely at every User-row write below; bulk writes flush it.
+		self._user_cache_ttl = 120  # seconds
+		self._user_cache_max = 500  # entries per dict
+		self._user_cache_by_name = {}  # username -> (OfflineClient, expiry)
+		self._user_cache_by_id = {}    # user_id  -> (OfflineClient, expiry)
+
 	def sess(self):
 		return self._root.session_manager.sess()
 
+	def _user_cache_get(self, store, key):
+		hit = store.get(key)
+		if hit is None:
+			return None
+		client, expiry = hit
+		if expiry < time.time():
+			del store[key]
+			return None
+		return client
+
+	def _user_cache_put(self, client):
+		# cache a positive hit under both keys; FIFO-evict when a dict is full
+		expiry = time.time() + self._user_cache_ttl
+		for store, key in ((self._user_cache_by_name, client.username), (self._user_cache_by_id, client.id)):
+			if key not in store and len(store) >= self._user_cache_max:
+				store.pop(next(iter(store)))
+			store[key] = (client, expiry)
+
+	def invalidate_user_cache(self, user_id=None, username=None):
+		if username is not None:
+			self._user_cache_by_name.pop(username, None)
+		if user_id is not None:
+			self._user_cache_by_id.pop(user_id, None)
+
+	def flush_user_cache(self):
+		self._user_cache_by_name.clear()
+		self._user_cache_by_id.clear()
+
 	def clientFromID(self, user_id):
+		cached = self._user_cache_get(self._user_cache_by_id, user_id)
+		if cached is not None:
+			return cached
 		entry = self.sess().query(User).filter(User.id==user_id).first()
 		if not entry: return None
-		return OfflineClient(entry)
+		client = OfflineClient(entry)
+		self._user_cache_put(client)
+		return client
 
 	def clientFromUsername(self, username):
+		cached = self._user_cache_get(self._user_cache_by_name, username)
+		if cached is not None:
+			return cached
 		entry = self.sess().query(User).filter(User.username==username).first()
 		if not entry: return None
-		return OfflineClient(entry)
+		client = OfflineClient(entry)
+		self._user_cache_put(client)
+		return client
 
 	def remaining_ban_str(self, dbban, now):
 		timeleft = int((dbban.end_date - now).total_seconds())
@@ -501,16 +550,18 @@ class UsersHandler:
 		return remaining
 
 	def check_banned(self, username, ip):
+		# returns (banned, reason, dbuser); dbuser is the live User row (or None) so the
+		# caller can hand it straight to login_user without re-querying it (1.4).
 		dbuser = self.sess().query(User).filter(User.username == username).first()
 		if not dbuser:
-			return False, ""
+			return False, "", None
 		now = datetime.now()
 		dbban = self._root.bandb.check_ban(dbuser.id, ip, dbuser.email, now)
 		if dbban and not dbuser.access=='admin':
 			reason = 'You are banned: (%s), ' %(dbban.reason)
 			reason += self.remaining_ban_str(dbban, now)
-			return True, reason
-		return False, ""
+			return True, reason, dbuser
+		return False, "", dbuser
 		
 	def check_login_user(self, username, password):
 		# password here is unicode(BASE64(MD5(...))), matches the register_user DB encoding
@@ -524,28 +575,38 @@ class UsersHandler:
 			return False, 'Invalid username or password'
 		return True, ""
 		
-	def login_user(self, username, password, ip, agent, last_sys_id, last_mac_id, local_ip, country):
+	def login_user(self, dbuser, ip, agent, last_sys_id, last_mac_id, local_ip, country):
+		# dbuser is the live User row already loaded by check_banned (1.4), so we don't
+		# re-query it here. All field updates plus the Login record are flushed in a
+		# single commit/transaction (1.3).
 		now = datetime.now()
-		dbuser = self.sess().query(User).filter(User.username == username).first()
 		dbuser.logins.append(Login(now, dbuser.id, ip, agent, last_sys_id, last_mac_id, local_ip, country))
 		dbuser.last_ip = ip
 		dbuser.last_agent = agent
 		dbuser.last_sys_id = last_sys_id
 		dbuser.last_mac_id = last_mac_id
-		dbuser.last_login = now 
-		
+		dbuser.last_login = now
+
+		# capture identifiers before commit; expire_on_commit would otherwise force a
+		# reload query just to read them back
+		uid, uname = dbuser.id, dbuser.username
 		self.sess().commit()
+		self.invalidate_user_cache(uid, uname)
 		return dbuser
 
 	def set_user_password(self, username, password):
 		dbuser = self.sess().query(User).filter(User.username==username).first()
 		dbuser.password = password
+		uid = dbuser.id
 		self.sess().commit()
+		self.invalidate_user_cache(uid, username)
 	def set_bot(self, user_id, is_bot):
 		dbuser = self.sess().query(User).filter(User.id==user_id).first()
 		if dbuser:
 			dbuser.bot = 1 if is_bot else 0
+			uname = dbuser.username
 			self.sess().commit()
+			self.invalidate_user_cache(user_id, uname)
 
 
 	def end_session(self, user_id):
@@ -553,7 +614,9 @@ class UsersHandler:
 		if entry and not entry.logins[-1].end:
 			entry.logins[-1].end = datetime.now()
 			entry.last_login = datetime.now() # in real its last online / last seen
+			uname = entry.username
 			self.sess().commit()
+			self.invalidate_user_cache(user_id, uname)
 
 	def check_user_name(self, user_name):
 		if len(user_name) > 20: return False, 'Username too long'
@@ -588,6 +651,9 @@ class UsersHandler:
 
 		self.sess().add(entry)
 		self.sess().commit()
+		# positives-only cache: a brand-new id has no stale entry, so invalidating the
+		# username alone covers the recreated-name edge without forcing a reload for id
+		self.invalidate_user_cache(username=username)
 		return True, 'Account registered successfully.'
 
 	def rename_user(self, username, newname):
@@ -601,7 +667,10 @@ class UsersHandler:
 			return False, 'You don\'t seem to exist anymore. Contact an admin or moderator.'
 		entry.renames.append(Rename(username))
 		entry.username = newname
+		uid = entry.id
 		self.sess().commit()
+		self.invalidate_user_cache(uid, username)
+		self.invalidate_user_cache(username=newname)
 		return True, 'Account renamed successfully.'
 
 	def save_user(self, obj):
@@ -617,8 +686,10 @@ class UsersHandler:
 			entry.last_mac_id = obj.last_mac_id
 			entry.email = obj.email
 
+		uid = entry.id if entry is not None else None
 		self.sess().commit()
-		
+		self.invalidate_user_cache(uid, obj.username)
+
 	def get_user_id_with_email(self, email):
 		if email == '':
 			return False, 'Email address is blank'
@@ -634,7 +705,9 @@ class UsersHandler:
 	def confirm_agreement(self, client):
 		entry = self.sess().query(User).filter(User.username==client.username).first()
 		if entry: entry.access = 'user'
+		uid = entry.id if entry else None
 		self.sess().commit()
+		self.invalidate_user_cache(uid, client.username)
 
 	def get_lastlogin(self, username):
 		entry = self.sess().query(User).filter(User.username==username).first()
@@ -682,8 +755,10 @@ class UsersHandler:
 		entry = self.sess().query(User).filter(User.username==user).first()
 		if not entry:
 			return False, 'User not found.'
+		user_id = entry.id
 		self.sess().delete(entry)
 		self.sess().commit()
+		self.invalidate_user_cache(user_id, user)
 		return True, 'Success.'
 
 	def clean(self):
@@ -708,8 +783,9 @@ class UsersHandler:
 		response = self.sess().query(ChannelHistory).filter(ChannelHistory.time < now - timedelta(days=14))
 		logging.info("deleting %i channel history messages", response.count())
 		response.delete(synchronize_session=False)
-		
+
 		self.sess().commit()
+		self.flush_user_cache()
 
 	def audit_access(self):
 		now = datetime.now()
@@ -728,8 +804,9 @@ class UsersHandler:
 		logging.info("removing %i inactive mods", response.count())
 		for user in response:
 			user.access = "user"
-	
+
 		self.sess().commit()
+		self.flush_user_cache()
 
 	def ignore_user(self, user_id, ignore_user_id, reason=None):
 		entry = Ignore(user_id, ignore_user_id, reason)
@@ -903,30 +980,64 @@ class BridgedUsersHandler:
 		response.delete(synchronize_session=False)
 		self.sess().commit()
 
+class CachedBan(object):
+	# session-independent snapshot of a Ban row, used by the 1.1 check_ban cache so
+	# cached entries can't be invalidated by session expire/close (DetachedInstanceError).
+	__slots__ = ('reason', 'end_date', 'user_id', 'ip', 'email')
+	def __init__(self, ban):
+		self.reason = ban.reason
+		self.end_date = ban.end_date
+		self.user_id = ban.user_id
+		self.ip = ban.ip
+		self.email = ban.email
+
 class BansHandler:
 	def __init__(self, root):
 		self._root = root
 
+		# 1.1: cache check_ban results. Bans change rarely but check_ban runs on every
+		# login and registration. Keyed by (user_id, ip, email); stores the matched
+		# CachedBan snapshot (or None) with a short TTL, so a newly-issued ban still
+		# takes effect within the TTL even if no flush reached us, and every ban
+		# add/remove flushes the cache immediately for instant effect.
+		self._ban_cache_ttl = 300  # seconds
+		self._ban_cache = {}       # (user_id, ip, email) -> (CachedBan|None, expiry)
+
 	def sess(self):
 		return self._root.session_manager.sess()
 
+	def _flush_ban_cache(self):
+		self._ban_cache.clear()
+
 	def check_ban(self, user_id=None, ip=None, email=None, now=None):
 		# check if any of the args are currently banned
-		# fixme: its probably possible to do this with a single db command!
 		if not now:
 			now = datetime.now()
+		key = (user_id, ip, email)
+		hit = self._ban_cache.get(key)
+		if hit is not None:
+			result, expiry = hit
+			# honour the TTL, and ensure a cached ban hasn't itself expired meanwhile
+			if now <= expiry and (result is None or now <= result.end_date):
+				return result
+		result = self._query_ban(user_id, ip, email, now)
+		self._ban_cache[key] = (result, now + timedelta(seconds=self._ban_cache_ttl))
+		return result
+
+	def _query_ban(self, user_id, ip, email, now):
+		# fixme: its probably possible to do this with a single db command!
 		if user_id:
 			userban = self.sess().query(Ban).filter(Ban.user_id == user_id, now <= Ban.end_date).first()
 			if userban:
-				return userban
+				return CachedBan(userban)
 		if ip:
 			ipban = self.sess().query(Ban).filter(Ban.ip == ip, now <= Ban.end_date).first()
 			if ipban:
-				return ipban
+				return CachedBan(ipban)
 		if email:
 			emailban = self.sess().query(Ban).filter(Ban.email == email, now <= Ban.end_date).first()
 			if emailban:
-				return emailban
+				return CachedBan(emailban)
 		return None
 
 	def ban(self, issuer, duration, reason, username):
@@ -942,6 +1053,7 @@ class BansHandler:
 		ban = Ban(issuer.user_id, duration, reason, entry.id, entry.last_ip, entry.email)
 		self.sess().add(ban)
 		self.sess().commit()
+		self._flush_ban_cache()
 		return True, 'Successfully banned %s, %s, %s for %s days.' % (username, entry.last_ip, entry.email, duration)
 
 	def ban_specific(self, issuer, duration, reason, arg):
@@ -964,6 +1076,7 @@ class BansHandler:
 			return False, "Unable to match '%s' to username/ip/email" % arg
 		self.sess().add(ban)
 		self.sess().commit()
+		self._flush_ban_cache()
 		return True, 'Successfully banned %s for %s days' % (arg, duration)
 
 	def unban(self, issuer, arg):
@@ -991,6 +1104,7 @@ class BansHandler:
 				self.sess().delete(result)
 				n_unban += 1
 		self.sess().commit()
+		self._flush_ban_cache()
 		if n_unban>0:
 			return True, 'Successfully removed %s bans relating to %s' % (n_unban, arg)
 		else:
@@ -1071,6 +1185,7 @@ class BansHandler:
 		logging.info("deleting %i expired bans", response.count())
 		response.delete(synchronize_session=False)
 		self.sess().commit()
+		self._flush_ban_cache()
 
 class VerificationsHandler:
 	def __init__(self, root):
@@ -1270,7 +1385,9 @@ class VerificationsHandler:
 
 		dbuser = self.sess().query(User).filter(User.id == user_id).first()
 		dbuser.password = new_password
+		uname = dbuser.username
 		self.sess().commit()
+		self._root.userdb.invalidate_user_cache(user_id, uname)
 
 		if email_to_user:
 			try:

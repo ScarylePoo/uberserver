@@ -71,7 +71,7 @@ def validateLogin(username, raw_password):
 		logger.info("validation failure: {}, {}".format(username, reason))
 		return {"status": 1}
 
-	banned, reason = root.userdb.check_banned(username, None)
+	banned, reason, _ = root.userdb.check_banned(username, None)
 	if banned:
 		logger.info("validation failure: {}, {}".format(username, reason))
 		return {"status": 1}
