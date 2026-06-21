@@ -2324,10 +2324,29 @@ class Protocol:
 		except:
 			self.out_FAILED(client, "GETCHANNELMESSAGES", "Invalid id", True)
 			return
-		msgs = self.userdb.get_channel_messages(client.user_id, channel.id, last_msg_id)
+		# 3.1: read channel history off the reactor thread. The worker returns plain
+		# [(datetime, username, msg, ex_msg, id), ...] - usernames are resolved inside the
+		# query (joins to User/BridgedUser), so the callback does NO reactor-side DB and
+		# needs no session bracket; it just formats + sends. A pure read, so no new races.
+		d = self._root.defer_db(self.userdb.get_channel_messages, client.user_id, channel.id, last_msg_id)
+		d.addCallback(self._channelmessages_send, client, chan)
+		d.addErrback(self._channelmessages_failed, client)
+
+	def _channelmessages_send(self, msgs, client, chan):
+		# reactor-thread callback: pure send, no DB -> no commit/rollback/close bracket.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
 		for msg in msgs:
 			timestamp = int(time.mktime(msg[0].timetuple()))
 			self.out_JSON(client,  'SAID', {"chanName": chan, "time": str(timestamp), "userName": msg[1], "msg": msg[2], "ex_msg":msg[3], "id": msg[4]})
+
+	def _channelmessages_failed(self, failure, client):
+		# reactor-thread errback: a DB error fetching history. Log it loudly; unlike the
+		# read-only social lists, GETCHANNELMESSAGES has a protocol failure reply, so use it.
+		logging.error("GETCHANNELMESSAGES DB error for <%s>: %s" % (getattr(client, 'username', '?'), failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call
+		self.out_FAILED(client, "GETCHANNELMESSAGES", "Server error fetching channel messages", True)
 
 	def in_RING(self, client, username):
 		'''
