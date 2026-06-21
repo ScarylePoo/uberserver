@@ -633,13 +633,16 @@ class DataHandler:
 		self.decrement_dict(self.recent_renames)
 
 	# the sourceClient is only sent for SAY*, and RING commands
-	def multicast(self, session_ids, msg, ignore=(), sourceClient=None, flag=None, not_flag=None):
+	# 2.1: takes an iterable of client objects directly (channel.user_clients,
+	# battle.user_clients or self.clients.values()) so there is no per-recipient
+	# clientFromSession() lookup. The outbound-stats command token is derived once
+	# here and passed to Send(), instead of RealSend() recomputing it per recipient.
+	def multicast(self, clients, msg, ignore=(), sourceClient=None, flag=None, not_flag=None):
 		assert(type(ignore) == set)
+		raw = msg[msg.find(" ")+1:] if msg.startswith('#') else msg
+		command = raw[:raw.find(" ")] if " " in raw else raw
 		static = []
-		for session_id in session_ids:
-			assert(type(session_id) == int)
-			client = self.clientFromSession(session_id)
-
+		for client in clients:
 			if not client.logged_in:
 				continue
 			if client.session_id in ignore:
@@ -654,21 +657,21 @@ class DataHandler:
 			if client.static:
 				static.append(client)
 			else:
-				client.Send(msg)
+				client.Send(msg, command)
 
 		# this is so static clients don't respond before other people even receive the message
 		for client in static:
-			client.Send(msg)
+			client.Send(msg, command)
 
 	# the sourceClient is only sent for SAY*, and RING commands
 	def broadcast(self, msg, chan=None, ignore=set(), sourceClient=None, flag=None, not_flag=None):
 		assert(type(ignore) == set)
 		try:
 			if not chan in self.channels:
-				self.multicast(self.clients, msg, ignore, sourceClient, flag, not_flag)
+				self.multicast(self.clients.values(), msg, ignore, sourceClient, flag, not_flag)
 				return
 			channel = self.channels[chan]
-			self.multicast(channel.users, msg, ignore, sourceClient, flag, not_flag)
+			self.multicast(channel.user_clients, msg, ignore, sourceClient, flag, not_flag)
 		except:
 			logging.error(traceback.format_exc())
 
@@ -679,7 +682,7 @@ class DataHandler:
 		if not battle_id in self.battles:
 			return
 		battle = self.battles[battle_id]
-		self.multicast(battle.users, msg, ignore, sourceClient, flag, not_flag)
+		self.multicast(battle.user_clients, msg, ignore, sourceClient, flag, not_flag)
 
 	def admin_broadcast(self, msg):
 		for user in self.usernames:
