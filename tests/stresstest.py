@@ -2,7 +2,7 @@
 # coding=utf-8
 # This file is part of the uberserver (GPL v2 or later), see LICENSE
 
-import socket, inspect
+import socket, inspect, errno
 import time
 import threading
 import traceback
@@ -101,7 +101,9 @@ class LobbyClient:
 		try:
 			self.socket_data += self.host_socket.recv(4096).decode("utf-8")
 		except BlockingIOError as e:
-			if e.errno == 11: # Resource temporarily unavailable
+			# no data available yet on the non-blocking socket: EAGAIN (errno 11
+			# on Linux) or EWOULDBLOCK (errno 35 on macOS/BSD)
+			if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
 				return
 			raise(e)
 
@@ -140,7 +142,7 @@ class LobbyClient:
 
 		funcname = 'in_%s' % command
 		function = getattr(self, funcname)
-		function_info = inspect.getargspec(function)
+		function_info = inspect.getfullargspec(function)
 		total_args = len(function_info[0]) - 1
 		optional_args = 0
 
