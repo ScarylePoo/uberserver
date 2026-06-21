@@ -903,30 +903,64 @@ class BridgedUsersHandler:
 		response.delete(synchronize_session=False)
 		self.sess().commit()
 
+class CachedBan(object):
+	# session-independent snapshot of a Ban row, used by the 1.1 check_ban cache so
+	# cached entries can't be invalidated by session expire/close (DetachedInstanceError).
+	__slots__ = ('reason', 'end_date', 'user_id', 'ip', 'email')
+	def __init__(self, ban):
+		self.reason = ban.reason
+		self.end_date = ban.end_date
+		self.user_id = ban.user_id
+		self.ip = ban.ip
+		self.email = ban.email
+
 class BansHandler:
 	def __init__(self, root):
 		self._root = root
 
+		# 1.1: cache check_ban results. Bans change rarely but check_ban runs on every
+		# login and registration. Keyed by (user_id, ip, email); stores the matched
+		# CachedBan snapshot (or None) with a short TTL, so a newly-issued ban still
+		# takes effect within the TTL even if no flush reached us, and every ban
+		# add/remove flushes the cache immediately for instant effect.
+		self._ban_cache_ttl = 300  # seconds
+		self._ban_cache = {}       # (user_id, ip, email) -> (CachedBan|None, expiry)
+
 	def sess(self):
 		return self._root.session_manager.sess()
 
+	def _flush_ban_cache(self):
+		self._ban_cache.clear()
+
 	def check_ban(self, user_id=None, ip=None, email=None, now=None):
 		# check if any of the args are currently banned
-		# fixme: its probably possible to do this with a single db command!
 		if not now:
 			now = datetime.now()
+		key = (user_id, ip, email)
+		hit = self._ban_cache.get(key)
+		if hit is not None:
+			result, expiry = hit
+			# honour the TTL, and ensure a cached ban hasn't itself expired meanwhile
+			if now <= expiry and (result is None or now <= result.end_date):
+				return result
+		result = self._query_ban(user_id, ip, email, now)
+		self._ban_cache[key] = (result, now + timedelta(seconds=self._ban_cache_ttl))
+		return result
+
+	def _query_ban(self, user_id, ip, email, now):
+		# fixme: its probably possible to do this with a single db command!
 		if user_id:
 			userban = self.sess().query(Ban).filter(Ban.user_id == user_id, now <= Ban.end_date).first()
 			if userban:
-				return userban
+				return CachedBan(userban)
 		if ip:
 			ipban = self.sess().query(Ban).filter(Ban.ip == ip, now <= Ban.end_date).first()
 			if ipban:
-				return ipban
+				return CachedBan(ipban)
 		if email:
 			emailban = self.sess().query(Ban).filter(Ban.email == email, now <= Ban.end_date).first()
 			if emailban:
-				return emailban
+				return CachedBan(emailban)
 		return None
 
 	def ban(self, issuer, duration, reason, username):
@@ -942,6 +976,7 @@ class BansHandler:
 		ban = Ban(issuer.user_id, duration, reason, entry.id, entry.last_ip, entry.email)
 		self.sess().add(ban)
 		self.sess().commit()
+		self._flush_ban_cache()
 		return True, 'Successfully banned %s, %s, %s for %s days.' % (username, entry.last_ip, entry.email, duration)
 
 	def ban_specific(self, issuer, duration, reason, arg):
@@ -964,6 +999,7 @@ class BansHandler:
 			return False, "Unable to match '%s' to username/ip/email" % arg
 		self.sess().add(ban)
 		self.sess().commit()
+		self._flush_ban_cache()
 		return True, 'Successfully banned %s for %s days' % (arg, duration)
 
 	def unban(self, issuer, arg):
@@ -991,6 +1027,7 @@ class BansHandler:
 				self.sess().delete(result)
 				n_unban += 1
 		self.sess().commit()
+		self._flush_ban_cache()
 		if n_unban>0:
 			return True, 'Successfully removed %s bans relating to %s' % (n_unban, arg)
 		else:
@@ -1071,6 +1108,7 @@ class BansHandler:
 		logging.info("deleting %i expired bans", response.count())
 		response.delete(synchronize_session=False)
 		self.sess().commit()
+		self._flush_ban_cache()
 
 class VerificationsHandler:
 	def __init__(self, root):
