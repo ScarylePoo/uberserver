@@ -240,16 +240,75 @@ appear to normal clients.
 
 **Covers:** the packed integer fields the protocol uses for presence and battle state.
 
-- **Client status** (`MYSTATUS` / `CLIENTSTATUS`): bitfield — in-game, away, rank
-  (3 bits, max 8 ranks; `ranks = (5, 15, 30, 100, 300, 1000, 3000)` ingame-hours
-  thresholds), access/bot/etc. **[GAP]** exact bit layout.
-- **Battle status** (`MYBATTLESTATUS` / `CLIENTBATTLESTATUS`): bitfield — ready,
-  team, ally, mode (spectator/player), handicap, sync, side. **[GAP]** exact bit layout.
-- **Team colour** (`teamcolor`): documented in code as hex `0xBBGGRR` transmitted as a
-  signed/decimal integer. **[GAP]** confirm exact transform and byte order.
+All bitfields are sent as a single **decimal** integer. Bit 0 is the least-significant
+bit. Multi-bit fields are stored most-significant-bit-first within the field (i.e. the
+value of a field at bits `[lo..hi]` is `(int >> lo) & ((1 << (hi-lo+1)) - 1)`).
+
+### 10.1 Client status (`MYSTATUS` / `CLIENTSTATUS`)
+
+7-bit field. Packed/unpacked in `Protocol.py` `_calc_status` (the line
+`bot, access, rank1, rank2, rank3, away, ingame = status[-7:]` and the reassembly
+`'%s%s%s%s%s%s%s' % (bot, access, rank1, rank2, rank3, away, ingame)`).
+
+| Bits | Width | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `ingame` | 1 = in a running game |
+| 1 | 1 | `away` | 1 = flagged away/AFK |
+| 2–4 | 3 | `rank` | 0–7, derived from ingame time (see below) |
+| 5 | 1 | `access` | 0 = normal user, 1 = moderator/admin |
+| 6 | 1 | `bot` | 1 = bot account |
+
+`rank` is the count of thresholds in `ranks = (5, 15, 30, 100, 300, 1000, 3000)`
+(ingame **hours**) that the account's accumulated ingame time meets or exceeds — so 0–7,
+fitting 3 bits. `ingame_time` is stored in minutes and divided by 60 for the comparison.
+
+**Server-forced bits.** On an incoming `MYSTATUS`, the server reads only `away` and
+`ingame` from the client; it **recomputes** `rank`, `access` and `bot` from server-side
+state (`client.ingame_time`, `client.access`, `client.bot`) and overwrites whatever the
+client sent for those bits. Clients should not rely on being able to set rank/access/bot.
+
+`CLIENTSTATUS <username> <status>` carries the resulting integer to all clients.
+
+### 10.2 Battle status (`MYBATTLESTATUS` / `CLIENTBATTLESTATUS`)
+
+32-bit field. Unpacked in `Protocol.py` `in_MYBATTLESTATUS` (the 32-way tuple destructure
+of `_dec2bin(battlestatus, 32)`) and repacked in `Battle.py` `calc_battlestatus`
+(`'0000%s%s0000%s%s%s%s%s0' % (side, sync, handicap, mode, ally, id, ready)`).
+
+| Bits | Width | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | — | unused (always 0) |
+| 1 | 1 | `ready` | 1 = ready |
+| 2–5 | 4 | `id` (team) | team number 0–15 |
+| 6–9 | 4 | `ally` | ally-team number 0–15 |
+| 10 | 1 | `mode` | 1 = player, 0 = spectator |
+| 11–17 | 7 | `handicap` | 0–100 |
+| 18–21 | 4 | — | unused (always 0) |
+| 22–23 | 2 | `sync` | 0 = unknown, 1 = synced, 2 = unsynced |
+| 24–27 | 4 | `side` | faction/side index 0–15 |
+| 28–31 | 4 | — | unused (always 0) |
+
+`CLIENTBATTLESTATUS <username> <battlestatus> <teamcolor>` carries the integer plus the
+team colour (see §10.3).
+
+> Note: `in_MYBATTLESTATUS` accepts a negative `int32` and adds `2^31` to recover the
+> intended unsigned value (with a warning), tolerating clients that sign-extend bit 31.
+
+### 10.3 Team colour (`teamcolor`)
+
+A colour is a 24-bit value laid out as hex `0xBBGGRR` — i.e. the **low** byte is red, the
+middle byte green, the high byte blue: `color = (B << 16) | (G << 8) | R`. It is
+transmitted as a **decimal** integer (the third argument of `CLIENTBATTLESTATUS`, and the
+second argument of `MYBATTLESTATUS` / `FORCETEAMCOLOR`).
+
+The server treats the colour as **opaque**: it validates the value fits a signed 32-bit
+integer (`int32`) and relays it verbatim — it never decomposes the RGB bytes. The
+`0xBBGGRR` ordering is therefore a client-side convention. Because the meaningful range is
+`0x000000`–`0xFFFFFF`, valid colours are always non-negative; the `sint` typing in the
+docstrings exists only to tolerate clients that send sign-extended values.
 
 This section is the highest-value formal-spec target: bitfields are where independent
-client implementations most easily go wrong, and the layout currently lives only in
+client implementations most easily go wrong, and the layout previously lived only in
 scattered parsing code.
 
 ---
@@ -323,8 +382,8 @@ Consolidated TODO list for iterating on this reference:
 1. **[Tooling]** Introduce an `@emits` docstring annotation on `in_*` handlers and a
    generator so the command reference (sections 5–13) is produced from code and cannot
    drift. Until then, response formats are documented by hand and may lag the code.
-2. **[Bitfields]** Formally specify client-status and battle-status bit layouts and the
-   `teamcolor` encoding (§10). Highest priority for client interoperability.
+2. ~~**[Bitfields]** Formally specify client-status and battle-status bit layouts and the
+   `teamcolor` encoding (§10).~~ Done — see [§10](#10-status--bitfield-reference).
 3. **[Battles]** Complete the battle hosting/join lifecycle (§7) — the largest content
    gap.
 4. **[Bridging]** Document the bridged-client model end to end (§9).
