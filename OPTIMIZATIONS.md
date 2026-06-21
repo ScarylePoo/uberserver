@@ -104,6 +104,65 @@ Document recommended values based on available RAM (rough guide: 1 pool connecti
 
 ---
 
+### 1.6 Cache Per-Command Argspecs
+
+**File:** `protocol/Protocol.py` — `get_function_args()` and `_handle()`
+
+**Problem:** `get_function_args()` calls `inspect.getfullargspec(function)` on *every*
+command dispatch. The argspec for a given `in_*` handler never changes, but it is
+recomputed via reflection for every message the server processes — this sits directly
+on the hottest code path in the server.
+
+```python
+# Current - reflection on every single command
+def get_function_args(self, client, command, function, numspaces, args):
+    function_info = inspect.getfullargspec(function)  # recomputed every time
+    ...
+```
+
+**Fix:** Compute each handler's argspec once (e.g. at startup, or lazily memoised into a
+dict keyed by command) and look it up O(1) thereafter. No behavioural change.
+
+**Expected impact:** Removes a reflection call from per-message processing. Small per
+call, but multiplied by every command from every client it is meaningful under load.
+Very low risk.
+
+---
+
+### 1.7 Buffer the Login State-Dump
+
+**File:** `protocol/Protocol.py` — `in_LOGIN()` state dump (the ADDUSER / ADDBATTLE /
+JOINEDBATTLE / CLIENTSTATUS loops) and `Client.py` — `Send()` / `flushBuffer()`
+
+**Problem:** On login the server sends the new client a full snapshot of the server:
+one message per online user, per battle, per battle member, and per non-zero status.
+These are sent via `RealSend()`, which is one `transport.write()` syscall per message.
+On a 2000-user / 300-battle server a single login issues *thousands* of individual
+writes, and the reactor cannot service other clients while it does so.
+
+The buffering machinery to fix this already exists but is unused here: the dump ends
+with `client.flushBuffer()`, but `buffersend` was never enabled, so the buffer is empty
+and the flush is a no-op.
+
+```python
+# Current - one syscall per message, then an empty flush
+for sessid, addclient in self._root.clients.items():
+    client.RealSend(self.client_AddUser(client, addclient))
+...
+client.flushBuffer()   # buffersend was never set True -> no-op
+```
+
+**Fix:** Set `client.buffersend = True` before the dump, send via `Send()` (which
+accumulates into `client.buffer`), then `flushBuffer()` once to write it in a single
+call. While here, switch `Client.buffer` from repeated string concatenation
+(`self.buffer += ...`, O(n²) for large dumps) to a list + `"".join` or a `bytearray`.
+On-the-wire output and message ordering must remain byte-identical.
+
+**Expected impact:** Collapses thousands of writes per login into a handful. Large win
+during login storms and server restarts. Low risk.
+
+---
+
 ## Phase 2 — Smarter Broadcasting (Medium Effort, High Impact for Battles)
 
 ### 2.1 Per-Channel Pub/Sub Broadcast
@@ -130,6 +189,11 @@ no dict lookups required per message.
 A server with 20 active battles of 10 players each currently does 200 iterations per
 battle message. With this fix it does 10.
 
+**Also fold in here:** the per-send cost itself. `Client.RealSend()` does two `str.find()`
+calls plus an outbound-stats dict update on *every* message it sends. Multiplied by
+fan-out this is non-trivial. Make the stats accounting cheaper (precompute the command
+token, or sample rather than count every send) as part of the same pass.
+
 ---
 
 ### 2.2 Login Queue
@@ -147,6 +211,27 @@ are in a queue. This is transparent to all existing clients — they already han
 
 **Expected impact:** Prevents login storms from degrading the entire server. Turns a
 hard failure mode into graceful queuing.
+
+---
+
+### 2.3 Bound Per-Client Write Buffers (Memory Safety)
+
+**File:** `twistedserver.py` / `Client.py` — the transport write path
+
+**Problem:** Twisted's `transport.write()` is non-blocking and buffers unsent data in
+memory with no bound. A client that stops reading (slow connection, slow-loris, crashed
+client holding the socket open) causes its server-side write buffer to grow without
+limit. With thousands of connections a handful of stalled readers can exhaust RAM. This
+is independent of the protocol and is a real denial-of-service vector.
+
+**Fix:** Apply backpressure. Either register a producer/consumer relationship so the
+server pauses producing for a client whose buffer is full, or set a write high-water
+mark and disconnect any client whose backlog exceeds it. Twisted exposes
+`registerProducer` / `pauseProducing` and transport buffer-size hooks for this.
+
+**Expected impact:** Caps worst-case memory per connection and removes a slow-client
+DoS vector. Should be in place **before** Phase 3 is load-tested, since async DB will
+let the server sustain far more concurrent connections.
 
 ---
 
@@ -189,6 +274,13 @@ def in_LOGIN(self, client, ...):
 - Callback chains in Twisted can be harder to reason about than linear code
 - Race conditions become possible where they weren't before (e.g. two simultaneous
   logins for the same username)
+- The shared in-memory state (`clients`, `usernames`, `user_ids`, `channels`,
+  `battles` in `DataHandler.py`) is currently safe only because everything runs on the
+  single reactor thread. Once DB work runs off-reactor, any callback that mutates these
+  dicts must do so back on the reactor thread (`reactor.callFromThread`) or under a
+  lock. Note the NAT/UDP server (`server.py`, `NATServer.py`) *already* reads
+  `usernames` from a second thread today, so this shared-state question is not purely
+  hypothetical — settle the locking story before widening off-reactor access.
 
 **Recommended approach:**
 1. Start with the login flow only — convert `in_LOGIN` and its DB calls first
@@ -230,9 +322,9 @@ Increase `--users` gradually. Watch `server.log` for errors and measure response
 ### Order of Implementation
 
 ```
-Phase 1.1 → 1.2 → 1.3 → 1.4 → 1.5
+Phase 1.1 → 1.2 → 1.3 → 1.4 → 1.5 → 1.6 → 1.7
     ↓
-Phase 2.1 → 2.2
+Phase 2.1 → 2.2 → 2.3
     ↓
 Phase 3.1
 ```
