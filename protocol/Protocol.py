@@ -319,10 +319,28 @@ class Protocol:
 			del self._root.user_ids[client.user_id]
 		#note: self._root.clients is managed by twistedserver.py
 
-		self.userdb.end_session(client.user_id)
+		# 3.1: persist the logout (login end + last_login) off the reactor thread. The
+		# in-memory teardown above already removed the client from usernames/user_ids, and
+		# RemoveUser is broadcast immediately below - neither waits on the DB write.
+		d = self._root.defer_db(self.userdb.do_end_session, client.user_id)
+		d.addCallback(self._end_session_done, client.user_id)
+		d.addErrback(self._end_session_failed, client.user_id)
 
 		# inform that the client left
 		self.broadcast_RemoveUser(client)
+
+	def _end_session_done(self, username, user_id):
+		# reactor-thread callback: the client is already being torn down, so we hold no
+		# client ref - only the plain user_id we passed in and the username the worker
+		# returned. Pure memory (1.2 cache invalidation), so no membership guard and no
+		# session bracket. username is None when the login was already ended (no-op).
+		if username is None:
+			return
+		self.userdb.invalidate_user_cache(user_id, username)
+
+	def _end_session_failed(self, failure, user_id):
+		# the logout timestamp did not get recorded; the in-memory teardown still happened.
+		logging.error("end_session persist failed for user_id %s: %s" % (user_id, failure.getTraceback()))
 
 
 	def get_function_args(self, client, command, function, numspaces, args):
@@ -2317,8 +2335,25 @@ class Protocol:
 			ingame_time = (time.time() - client.went_ingame) / 60
 			if ingame_time >= 1:
 				client.ingame_time += int(ingame_time)
-				self.userdb.save_user(client)
+				# 3.1: persist the new ingame_time off the reactor thread. The in-memory
+				# total is already updated above and the CLIENTSTATUS broadcast below does
+				# not wait on the DB write.
+				d = self._root.defer_db(self.userdb.do_set_ingame_time, client.username, client.ingame_time)
+				d.addCallback(self._ingame_time_saved, client.user_id, client.username)
+				d.addErrback(self._ingame_time_save_failed, client.username)
 		self._root.broadcast('CLIENTSTATUS %s %d'%(client.username, client.status))
+
+	def _ingame_time_saved(self, uid, user_id, username):
+		# reactor-thread callback: pure memory (1.2 cache invalidation), no session bracket.
+		# uid is None only if the user vanished from the db mid-flight (not expected here).
+		if uid is None:
+			return
+		self.userdb.invalidate_user_cache(user_id, username)
+
+	def _ingame_time_save_failed(self, failure, username):
+		# the ingame_time stat did not persist; the in-memory client.ingame_time is ahead of
+		# the db and a later save will reconcile it.
+		logging.error("MYSTATUS ingame_time persist failed for <%s>: %s" % (username, failure.getTraceback()))
 
 	def in_CHANNELS(self, client):
 		'''

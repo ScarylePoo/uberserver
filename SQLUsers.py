@@ -651,14 +651,17 @@ class UsersHandler:
 			self.invalidate_user_cache(user_id, uname)
 
 
-	def end_session(self, user_id):
+	def do_end_session(self, user_id):
+		# 3.1 worker: PURE DB, one uncommitted transaction (defer_db/_run_db owns the
+		# commit and retries on serialization errors). Returns the plain username for the
+		# reactor callback to invalidate the 1.2 cache with; never touches the cache itself.
+		# Idempotent: if the most recent login is already ended, do nothing and return None.
 		entry = self.sess().query(User).filter(User.id==user_id).first()
-		if entry and not entry.logins[-1].end:
-			entry.logins[-1].end = datetime.now()
-			entry.last_login = datetime.now() # in real its last online / last seen
-			uname = entry.username
-			self.sess().commit()
-			self.invalidate_user_cache(user_id, uname)
+		if not entry or not entry.logins or entry.logins[-1].end:
+			return None
+		entry.logins[-1].end = datetime.now()
+		entry.last_login = datetime.now() # in real its last online / last seen
+		return entry.username
 
 	def check_user_name(self, user_name):
 		if len(user_name) > 20: return False, 'Username too long'
@@ -731,6 +734,20 @@ class UsersHandler:
 		uid = entry.id if entry is not None else None
 		self.sess().commit()
 		self.invalidate_user_cache(uid, obj.username)
+
+	def do_set_ingame_time(self, username, ingame_time):
+		# 3.1 worker: PURE DB, one uncommitted transaction. MYSTATUS only ever changes
+		# ingame_time; we write the ABSOLUTE total (the reactor already incremented the
+		# in-memory client.ingame_time) so a _run_db retry re-applies the same value rather
+		# than double-counting. Other User fields are left untouched on purpose - this avoids
+		# clobbering a field a concurrent handler (e.g. CHANGEPASSWORD) may have just written,
+		# the race that deferring the old all-field save_user would have opened. Returns the
+		# user id for the reactor callback to invalidate the 1.2 cache with.
+		entry = self.sess().query(User).filter(User.username==username).first()
+		if entry is None:
+			return None
+		entry.ingame_time = ingame_time
+		return entry.id
 
 	def get_user_id_with_email(self, email):
 		if email == '':
