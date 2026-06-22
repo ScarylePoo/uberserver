@@ -2969,13 +2969,29 @@ class Protocol:
 			self.out_SERVERMSG(client, '%s' % reason)
 			return
 			
-		good, reason = self.userdb.check_login_user(client.username, cur_password)
-		if not good:
-			self.out_SERVERMSG(client, '%s' % reason)
-			return
+		# 3.1: re-verify the current password and write the new one off the reactor thread
+		# as one atomic DB unit. The callback (on the reactor) invalidates the 1.2 user
+		# cache and replies; it does no reactor-side DB, so it needs no session bracket.
+		d = self._root.defer_db(self.userdb.do_change_password, client.username, cur_password, new_password)
+		d.addCallback(self._changepassword_done, client)
+		d.addErrback(self._changepassword_failed, client)
 
-		self.userdb.set_user_password(client.username, new_password)
+	def _changepassword_done(self, verdict, client):
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB op
+		if verdict[0] == 'denied':
+			self.out_SERVERMSG(client, '%s' % verdict[1])
+			return
+		# verdict == ('ok', uid): the new password is committed; drop the stale cache entry
+		self.userdb.invalidate_user_cache(verdict[1], client.username)
 		self.out_SERVERMSG(client, 'Password changed successfully.')
+
+	def _changepassword_failed(self, failure, client):
+		# reactor-thread errback: a DB error means the password was not changed.
+		logging.error("CHANGEPASSWORD DB error for <%s>: %s" % (getattr(client, 'username', '?'), failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		self.out_SERVERMSG(client, "Server error processing CHANGEPASSWORD.")
 
 	def in_SETBOTMODE(self, client, username, mode):
 		# set bot mode of target user
