@@ -698,6 +698,22 @@ class UsersHandler:
 		self.invalidate_user_cache(username=username)
 		return True, 'Account registered successfully.'
 
+	def do_register_insert(self, username, password, ip, email):
+		# 3.1 worker: INSERT the new account as one uncommitted transaction (defer_db/_run_db
+		# owns the commit). check_register_user already ran on the reactor, but a concurrent
+		# REGISTER or RENAMEACCOUNT can still win the same username/email in the gap before
+		# this insert, so catch the unique-constraint violation and report it as ('taken',)
+		# rather than letting a 1062 surface as a server error. On success returns the new id
+		# for the reactor callback; never touches the 1.2 cache (that stays on the reactor).
+		entry = User(username, password, ip, email)
+		self.sess().add(entry)
+		try:
+			self.sess().flush()  # forces the INSERT now so we can catch the dup here
+		except IntegrityError:
+			self.sess().rollback()
+			return ('taken',)
+		return ('ok', entry.id)
+
 	def rename_user(self, username, newname):
 		if newname == username:
 			return False, 'You already have that username.'

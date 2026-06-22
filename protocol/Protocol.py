@@ -870,7 +870,7 @@ class Protocol:
 		@required.str password: Password to use (old-style: BASE64(MD5(PWRD)), new-style: BASE64(PWRD))
 		'''
 
-		# well formed-ness tests
+		# well formed-ness tests (memory only)
 		good, reason = self._validUsernameSyntax(username)
 		if not good:
 			client.Send("REGISTRATIONDENIED %s" % (reason))
@@ -881,10 +881,22 @@ class Protocol:
 			client.Send("REGISTRATIONDENIED %s" % (reason))
 			return
 
-		# test if user would be OK on db side (e.g. duplication)
+		# 3.1: two-hop async register, mirroring the LOGIN flow. Hop 1 runs the uniqueness +
+		# ban check (check_register_user) off the reactor thread; the memory-only checks and
+		# the INSERT continue in _register_checked, preserving the original denial ordering.
 		email = email.lower()
-		good, reason = self.userdb.check_register_user(username, email, client.ip_address)
-		if (not good):
+		d = self._root.defer_db(self.userdb.check_register_user, username, email, client.ip_address)
+		d.addCallback(self._register_checked, client, username, password, email)
+		d.addErrback(self._register_failed, client, username)
+
+	def _register_checked(self, verdict, client, username, password, email):
+		# reactor-thread callback after the uniqueness/ban check. Applies the same memory-only
+		# checks in the original order, then defers the INSERT (hop 2). No reactor-side DB here,
+		# so no session bracket.
+		if client.session_id not in self._root.clients:
+			return # registrant disconnected during the DB check
+		good, reason = verdict
+		if not good:
 			logging.info('[%s] Registration failed for user <%s>: %s' % (client.session_id, username, reason))
 			client.Send('REGISTRATIONDENIED %s' % reason)
 			return
@@ -899,39 +911,73 @@ class Protocol:
 		else:
 			email = None # avoid triggering uniqueness constraint with empty strings
 
-		# rate limit per ip
+		# rate limit per ip - stays AFTER the uniqueness check (so a failed-uniqueness attempt
+		# does not count) and on the reactor (it mutates _root.recent_registrations)
 		recent_regs = self._root.recent_registrations.get(client.ip_address, 0)
 		if recent_regs >= 3 and client.ip_address != self._root.online_ip:
 			client.Send("REGISTRATIONDENIED too many recent registration attempts, please try again later")
 			return
 		self._root.recent_registrations[client.ip_address] = recent_regs + 1
 
-		#save user to db
-		self.userdb.register_user(username, password, client.ip_address, email)
-		client_fromdb = self.clientFromUsername(username, True)
+		# hop 2: INSERT off the reactor; the worker catches the unique-constraint race.
+		d = self._root.defer_db(self.userdb.do_register_insert, username, password, client.ip_address, email)
+		d.addCallback(self._register_inserted, client, username, email)
+		d.addErrback(self._register_failed, client, username)
 
-		# verification
-		verif_reason = "registered an account on the " + self._root.mail_identity + " lobbyserver (username: %s)" % username
-		good, reason = self.verificationdb.check_and_send(client_fromdb.user_id, email, 4, verif_reason)
-		if (not good):
+	def _register_inserted(self, verdict, client, username, email):
+		# reactor-thread callback after the INSERT.
+		if client.session_id not in self._root.clients:
+			return # disconnected mid-insert; if the row was created that is fine (account exists)
+		if verdict[0] == 'taken':
+			# a concurrent REGISTER/RENAMEACCOUNT won the same name/email in the gap after the
+			# check; report it like the original duplicate path rather than a server error
+			client.Send('REGISTRATIONDENIED Username is already in use.')
+			return
+		user_id = verdict[1]
+		# invalidate the 1.2 cache on the reactor (covers the recreated-name edge), like
+		# register_user did. The worker must not touch the cache.
+		self.userdb.invalidate_user_cache(username=username)
+
+		# verification (DB; a no-op returning (True,'') when verification is inactive, which is
+		# the default). NOTE: when verification IS active this is still a synchronous reactor-side
+		# DB call - deferring the whole verification/email path is the later Account/verify slice.
+		# It runs outside dataReceived's session guard, so bracket the reactor session.
+		try:
+			verif_reason = "registered an account on the " + self._root.mail_identity + " lobbyserver (username: %s)" % username
+			good, reason = self.verificationdb.check_and_send(user_id, email, 4, verif_reason)
+			self._root.session_manager.commit_guard()
+		except:
+			logging.error(traceback.format_exc())
+			self._root.session_manager.rollback_guard()
+			good, reason = False, "internal error"
+		finally:
+			self._root.session_manager.close_guard()
+		if not good:
 			client.Send("REGISTRATIONDENIED %s" % ("verification failed: " + reason))
 			return
 
 		# declare success
 		client.access = 'agreement'
 		client.Send('REGISTRATIONACCEPTED')
-		
-		try: 
-			thread.start_new_thread(self._check_nonresidential_ip, (client_fromdb.user_id, client_fromdb.username, client.ip_address))
-		except: 
-			logging.error('Failed to launch _check_nonresidential_ip: %s, %s, %s' % (client_fromdb.user_id, client_fromdb.username, client.ip_address))
+
+		try:
+			thread.start_new_thread(self._check_nonresidential_ip, (user_id, username, client.ip_address))
+		except:
+			logging.error('Failed to launch _check_nonresidential_ip: %s, %s, %s' % (user_id, username, client.ip_address))
 
 		logging.info('[%s] Successfully registered user <%s>.' % (client.session_id, username))
 		ip_str = client.ip_address
 		if client.local_ip != client.ip_address:
 			ip_str += " " + client.local_ip
 		self.broadcast_Moderator('New: %s %s %s' %(username, ip_str, client.country_code))
-	
+
+	def _register_failed(self, failure, client, username):
+		# reactor-thread errback for either hop: the registration did not complete.
+		logging.error("REGISTER DB error for <%s>: %s" % (username, failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		client.Send("REGISTRATIONDENIED Server error processing registration.")
+
 	def _check_nonresidential_ip(self, user_id, username, ip_address):
 		if not self._root.iphub_xkey:
 			return
