@@ -799,14 +799,6 @@ class Protocol:
 		else:
 			return self.userdb.is_ignored(client.user_id, ignoredClient.user_id)
 
-	def ignore_user(self, client, ignoreClient, reason=None):
-		self.userdb.ignore_user(client.user_id, ignoreClient.user_id, reason)
-		client.ignored[ignoreClient.user_id] = True
-
-	def unignore_user(self, client, unignoreClient):
-		self.userdb.unignore_user(client.user_id, unignoreClient.user_id)
-		client.ignored.pop(unignoreClient.user_id)
-
 	# Begin incoming protocol section #
 	#
 	# any function definition beginning with in_ and ending with capital letters
@@ -1603,25 +1595,45 @@ class Protocol:
 			self.out_SERVERMSG(client, "Missing userName argument.")
 			return
 		reason = tags.get("reason")
+		# 3.1: resolve the target (id + access) off the reactor. The mod check needs the
+		# target's access; the already-ignored/list-full checks and the client.ignored
+		# mutation stay on the reactor thread (live memory) - see the callbacks below.
+		d = self._root.defer_db(self.userdb._user_access_from_username, username)
+		d.addCallback(self._ignore_resolved, client, username, reason)
+		d.addErrback(self._ignore_op_failed, client, "IGNORE")
 
-		ignoreClient = self.clientFromUsername(username, True)
-		if not ignoreClient:
+	def _ignore_resolved(self, resolved, client, username, reason):
+		# reactor-thread callback: resolved is (target_id, access) or None. No reactor-side DB
+		# here (only memory reads + a second deferred), so no session bracket is needed.
+		# Mid-checks run in the original order: nouser, mod, self, already-ignored, list-full.
+		if client.session_id not in self._root.clients:
+			return # issuer disconnected during the resolve
+		if resolved is None:
 			self.out_SERVERMSG(client, "No such user.")
 			return
-		if ignoreClient.access in ('mod', 'admin'):
+		target_id, access = resolved
+		if access in ('mod', 'admin'):
 			self.out_SERVERMSG(client, "Can't ignore a moderator.")
 			return
 		if username == client.username:
 			self.out_SERVERMSG(client, "Can't ignore self.")
 			return
-		if self.is_ignored(client, ignoreClient):
+		if target_id in client.ignored:
 			self.out_SERVERMSG(client, "User is already ignored.")
 			return
 		if len(client.ignored) >= 50:
 			self.out_SERVERMSG(client, "Ignore list full (50 users).")
 			return
+		# checks passed: do the bare INSERT off the reactor, then sync memory + reply.
+		d = self._root.defer_db(self.userdb.do_ignore_insert, client.user_id, target_id, reason)
+		d.addCallback(self._ignore_stored, client, username, target_id, reason)
+		d.addErrback(self._ignore_op_failed, client, "IGNORE")
 
-		self.ignore_user(client, ignoreClient, reason)
+	def _ignore_stored(self, result, client, username, target_id, reason):
+		# reactor-thread callback: the row is committed; sync in-memory state + reply.
+		if client.session_id not in self._root.clients:
+			return # issuer disconnected during the INSERT (the row was still stored)
+		client.ignored[target_id] = True # idempotent: safe even if a concurrent op set it
 		if not reason or not reason.strip():
 			client.Send('IGNORE userName=%s' % (username))
 		else:
@@ -1639,16 +1651,41 @@ class Protocol:
 		if not username:
 			self.out_SERVERMSG(client, "Missing userName argument.")
 			return
-		unignoreClient = self.clientFromUsername(username, True)
-		if not unignoreClient:
+		# 3.1: resolve off the reactor (reuse the IGNORE resolver; access is unused here).
+		# The not-ignored check reads live memory and the DELETE runs off the reactor.
+		d = self._root.defer_db(self.userdb._user_access_from_username, username)
+		d.addCallback(self._unignore_resolved, client, username)
+		d.addErrback(self._ignore_op_failed, client, "UNIGNORE")
+
+	def _unignore_resolved(self, resolved, client, username):
+		# reactor-thread callback: only memory + a second deferred, so no session bracket.
+		if client.session_id not in self._root.clients:
+			return # issuer disconnected during the resolve
+		if resolved is None:
 			self.out_SERVERMSG(client, "No such user.")
 			return
-		if not self.is_ignored(client, unignoreClient):
+		target_id = resolved[0]
+		if target_id not in client.ignored:
 			self.out_SERVERMSG(client, "User is not ignored.")
 			return
+		d = self._root.defer_db(self.userdb.do_unignore_delete, client.user_id, target_id)
+		d.addCallback(self._unignore_removed, client, username, target_id)
+		d.addErrback(self._ignore_op_failed, client, "UNIGNORE")
 
-		self.unignore_user(client, unignoreClient)
+	def _unignore_removed(self, result, client, username, target_id):
+		# reactor-thread callback: the row(s) are deleted; sync in-memory state + reply.
+		if client.session_id not in self._root.clients:
+			return # issuer disconnected during the DELETE (the row was still removed)
+		client.ignored.pop(target_id, None) # tolerant: may already be gone via a race
 		client.Send('UNIGNORE userName=%s' % (username))
+
+	def _ignore_op_failed(self, failure, client, op):
+		# reactor-thread errback shared by IGNORE/UNIGNORE: a DB error means the mutation did
+		# not happen, so client.ignored is left untouched (DB and memory stay consistent).
+		logging.error("%s DB error for <%s>: %s" % (op, getattr(client, 'username', '?'), failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		self.out_SERVERMSG(client, "Server error processing %s." % op)
 
 	def in_IGNORELIST(self, client):
 		# 3.1: read the ignore list off the reactor thread, then format + send in
