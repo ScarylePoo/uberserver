@@ -1293,7 +1293,8 @@ class Protocol:
 			client.Send('CHANNELMESSAGE %s You are %s.' % (chan, channel.getMuteMessage(client)))
 			return
 		if channel.store_history:
-			self.userdb.add_channel_message(channel.id, client.user_id, None, msg, False)
+			# 3.1: persist off the reactor, serialized per channel to preserve id order
+			self._enqueue_channel_store(channel, client.user_id, None, msg, False)
 
 		self._root.broadcast('SAID %s %s %s' % (chan, client.username, msg), chan, set([]), client, 'u')
 		
@@ -1329,8 +1330,9 @@ class Protocol:
 		if channel.isMuted(client):
 			client.Send('CHANNELMESSAGE %s You are %s.' % (chan, channel.getMuteMessage(client)))
 			return
-		if channel.store_history: 
-			self.userdb.add_channel_message(channel.id, client.user_id, None, msg, True)
+		if channel.store_history:
+			# 3.1: persist off the reactor, serialized per channel to preserve id order
+			self._enqueue_channel_store(channel, client.user_id, None, msg, True)
 
 		self._root.broadcast('SAIDEX %s %s %s' % (chan, client.username, msg), chan, set([]), client, 'u')
 
@@ -1536,8 +1538,9 @@ class Protocol:
 		if not bridgedClient.bridged_id in channel.bridged_users:
 			self.out_FAILED(client, "SAYFROM", "Bridged user <%s> not present in channel" % bridgedClient.username, False)
 			return
-		if channel.store_history: 
-			self.userdb.add_channel_message(channel.id, client.user_id, bridgedClient.bridged_id, msg, False)
+		if channel.store_history:
+			# 3.1: persist off the reactor, serialized per channel to preserve id order
+			self._enqueue_channel_store(channel, client.user_id, bridgedClient.bridged_id, msg, False)
 
 		self._root.broadcast('SAIDFROM %s %s %s' % (chan, bridgedClient.username, msg), chan, set([]), client, 'u')
 		
@@ -1547,7 +1550,45 @@ class Protocol:
 			self._root.broadcast('SAIDBATTLE %s %s' % (client.username, msg), chan, set([]), client, None, 'u')
 		else:
 			self._root.broadcast('SAID %s %s %s' % (chan, client.username, msg), chan, set([]), client, None, 'u')
-		
+
+	# 3.1: per-channel serialized history store. The live SAID/SAIDEX/SAIDFROM broadcast
+	# already went out on the reactor in arrival order; here we persist the message off the
+	# reactor without reordering it. Each channel drains its queue one INSERT at a time, so
+	# the channel_history autoincrement ids stay monotonic with arrival order and
+	# GETCHANNELMESSAGES catch-up matches what live users saw.
+	_channel_store_max = 10000 # per-channel backlog cap; only reached if the DB stalls badly
+
+	def _enqueue_channel_store(self, channel, user_id, bridged_id, msg, ex_msg):
+		# reactor thread only. Append the store and kick the pump if idle.
+		if len(channel.history_queue) >= self._channel_store_max:
+			# DB is not keeping up; drop loudly rather than grow without bound (fail loud)
+			logging.error("channel %s history backlog full (%d); dropping a stored message" % (channel.id, self._channel_store_max))
+			return
+		channel.history_queue.append((user_id, bridged_id, msg, ex_msg))
+		self._pump_channel_store(channel)
+
+	def _pump_channel_store(self, channel):
+		# reactor thread only. Start the next store iff none is in flight for this channel.
+		if channel.history_inflight or not channel.history_queue:
+			return
+		channel.history_inflight = True
+		user_id, bridged_id, msg, ex_msg = channel.history_queue.popleft()
+		d = self._root.defer_db(self.userdb.add_channel_message, channel.id, user_id, bridged_id, msg, ex_msg)
+		d.addCallback(self._channel_store_done, channel)
+		d.addErrback(self._channel_store_failed, channel)
+
+	def _channel_store_done(self, result, channel):
+		# reactor-thread callback: store committed; release the slot and drain the next.
+		channel.history_inflight = False
+		self._pump_channel_store(channel)
+
+	def _channel_store_failed(self, failure, channel):
+		# reactor-thread errback: this store failed (the message was still broadcast live).
+		# Log it, then continue draining so one bad row does not stall the channel.
+		logging.error("channel %s history store failed: %s" % (channel.id, failure.getTraceback()))
+		channel.history_inflight = False
+		self._pump_channel_store(channel)
+
 	def in_IGNORE(self, client, tags):
 		'''
 		Tells the server to add the user to the client's ignore list. Doing this will prevent any SAID*, SAYPRIVATE and RING commands to be received from the ignored user.
