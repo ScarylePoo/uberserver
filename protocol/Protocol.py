@@ -3447,10 +3447,35 @@ class Protocol:
 		if not good:
 			client.Send("CHANGEEMAILDENIED " + reason)
 			return
+
+		# 3.1: the verification gate stays on the reactor (it self-commits, so it can't be folded
+		# into the single-transaction worker). The users-row email write runs off the reactor as
+		# one atomic DB unit; the callback (on the reactor) sets the new email in memory, invalidates
+		# the 1.2 cache and replies. It does no reactor-side DB, so it needs no session bracket.
+		d = self._root.defer_db(self.userdb.do_change_email, client.username, newmail)
+		d.addCallback(self._changeemail_done, client, newmail)
+		d.addErrback(self._changeemail_failed, client, newmail)
+
+	def _changeemail_done(self, verdict, client, newmail):
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB op
+		if verdict[0] == 'denied':
+			client.Send("CHANGEEMAILDENIED " + verdict[1])
+			return
+		# verdict == ('ok', uid, newmail): the new email is committed. Set it in memory now (not
+		# before deferring, so a 1062 denial leaves no stale in-memory email), invalidate the 1.2
+		# cache by id+name (drops a stale offline snapshot carrying the old email), then notify.
 		client.email = newmail
-		self.userdb.save_user(client)
+		self.userdb.invalidate_user_cache(verdict[1], client.username)
 		self.out_SERVERMSG(client, "Your email address has been changed to " + client.email)
 		client.Send("CHANGEEMAILACCEPTED " + newmail)
+
+	def _changeemail_failed(self, failure, client, newmail):
+		# reactor-thread errback: a DB error means the email did not change.
+		logging.error("CHANGEEMAIL DB error for <%s> -> <%s>: %s" % (getattr(client, 'username', '?'), newmail, failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		self.out_SERVERMSG(client, "Server error processing CHANGEEMAIL.")
 
 	def in_RESETPASSWORDREQUEST(self, client, email):
 		# client requests to reset the pw of an account; account recovery by email
