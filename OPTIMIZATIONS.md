@@ -293,6 +293,45 @@ def in_LOGIN(self, client, ...):
 5-10x. The server becomes responsive under load that would currently cause it to
 stall completely.
 
+### Status: complete
+
+3.1 was delivered incrementally, one handler group per PR, each using the same pattern:
+the blocking SQLAlchemy work runs on the reactor thread pool via `DataHandler.defer_db`
+(`deferToThread` + a retrying, fresh-session `_run_db` unit-of-work), the worker does pure
+DB I/O returning plain data, and a reactor-thread Deferred callback performs all shared-state
+mutation, cache updates and `client.Send`. Off-reactor workers never hand back live ORM rows
+or touch shared in-memory state; non-deterministic inputs (generated passwords, timestamps)
+are computed once on the reactor and passed in so a retry re-applies identical values.
+
+Converted off the reactor:
+
+- **Login / session lifecycle:** `in_LOGIN`, `MYSTATUS` ingame-time + logout, `end_session`
+  (now a retrying fresh-session worker, so a disconnect racing another off-reactor users-row
+  write absorbs the transient `1020` instead of surfacing it).
+- **Account / social:** `REGISTER`, `RENAMEACCOUNT`, `CHANGEPASSWORD`, `CHANGEEMAIL`,
+  friend mutations, `IGNORE`/`UNIGNORE`, social list reads, channel history reads, `SAY`
+  history stores.
+- **Close-out slice (this work):** `CONFIRMAGREEMENT` (access write), `DELETEACCOUNT`
+  (account scrub), `RESETPASSWORD`, `RESETUSERPASSWORD`, and the admin reads `LISTBANS`,
+  `LISTBLACKLIST`, `LISTMODS`, `GETIP`, `FINDIP`.
+
+#### Intentionally left synchronous
+
+The following admin/moderator-only handlers were **deliberately not** converted. They are
+infrequent (gated behind `mod`/`admin` access and used a handful of times per day at most),
+issue a single simple query, and sit nowhere near the throughput hot path, so deferring them
+would add callback machinery and a thread-pool hop for no measurable reactor relief — pure
+churn against the surgical-change principle. If load profiling ever shows one of these
+stalling the reactor, it converts with the same pattern as the rest of 3.1.
+
+- `BAN`, `BANSPECIFIC`, `UNBAN`
+- `BLACKLIST`, `UNBLACKLIST`
+- `SETACCESS`, `SETBOTMODE`, `CREATEBOTACCOUNT`
+- `SETMINSPRINGVERSION`
+- `RESETPASSWORDREQUEST`, `CHANGEEMAILREQUEST`, `RESENDVERIFICATION`
+
+With this slice, **3.1 — and the optimization roadmap in this document — is complete.**
+
 ---
 
 ## Implementation Notes
