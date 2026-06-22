@@ -636,12 +636,19 @@ class UsersHandler:
 		self.sess().commit()
 		return snapshot
 
-	def set_user_password(self, username, password):
+	def do_change_password(self, username, cur_password, new_password):
+		# 3.1 worker: re-verify the current password and write the new one as ONE
+		# uncommitted transaction (atomic check-then-set; _run_db owns the commit).
+		# Returns ('denied', reason) without writing on a credential mismatch (or a
+		# vanished user), else ('ok', uid). Cache-free - the reactor callback does the
+		# 1.2 user-cache invalidation; this must not touch shared in-memory state.
+		good, reason = self.check_login_user(username, cur_password)
+		if not good:
+			return ('denied', reason)
 		dbuser = self.sess().query(User).filter(User.username==username).first()
-		dbuser.password = password
-		uid = dbuser.id
-		self.sess().commit()
-		self.invalidate_user_cache(uid, username)
+		dbuser.password = new_password
+		return ('ok', dbuser.id)
+
 	def set_bot(self, user_id, is_bot):
 		dbuser = self.sess().query(User).filter(User.id==user_id).first()
 		if dbuser:
