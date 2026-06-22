@@ -783,6 +783,29 @@ class UsersHandler:
 		entry.ingame_time = ingame_time
 		return entry.id
 
+	def do_change_email(self, username, newmail):
+		# 3.1 worker: PURE DB, one uncommitted transaction (_run_db owns the commit + retry).
+		# CHANGEEMAIL only changes email, so we write ONLY that field rather than mirroring the
+		# all-field save_user: writing ingame_time/password/access here would clobber a value a
+		# concurrent handler (MYSTATUS's do_set_ingame_time, CHANGEPASSWORD) may have just written
+		# - the same clobber do_set_ingame_time avoids. users.email is UNIQUE, so the residual
+		# change-to-taken race that slips past the reactor pre-check surfaces as a 1062, which is
+		# NOT in _run_db's retry set; flush() forces it to fire HERE so we catch it, roll back,
+		# and deny rather than retry a doomed write. The verification gate stays on the reactor
+		# (it self-commits, so it can't live inside this single-transaction unit). Returns the
+		# user id for the reactor callback to invalidate the 1.2 cache with.
+		entry = self.sess().query(User).filter(User.username==username).first()
+		if entry is None:
+			return ('denied', 'You don\'t seem to exist anymore. Contact an admin or moderator.')
+		try:
+			entry.email = newmail
+			uid = entry.id
+			self.sess().flush() # force the UNIQUE check to fire HERE so 1062 is catchable
+		except IntegrityError:
+			self.sess().rollback()
+			return ('denied', "another user is already registered to the email address '%s'" % newmail)
+		return ('ok', uid, newmail)
+
 	def get_user_id_with_email(self, email):
 		if email == '':
 			return False, 'Email address is blank'
