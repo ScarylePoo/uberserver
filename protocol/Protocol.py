@@ -1652,27 +1652,38 @@ class Protocol:
 		if not username:
 			self.out_SERVERMSG(client, "Missing userName argument.")
 			return
-		msg = tags.get("msg")
-
-		friendRequestClient = self.clientFromUsername(username, True)
-		if not friendRequestClient:
-			self.out_SERVERMSG(client, "No such user.")
-			return
 		if username == client.username:
 			self.out_SERVERMSG(client, "Can't send friend request to self. Sorry :(")
 			return
-		if self.userdb.are_friends(client.user_id, friendRequestClient.user_id):
+		msg = tags.get("msg")
+		# 3.1: resolve the target + run all the checks (are_friends / ignored / existing
+		# request) + insert the request as ONE atomic DB unit off the reactor thread. The
+		# checks move into the worker because the target may be offline (a DB hit) and the
+		# online ignore-set is kept in sync with the ignores table, so the db check is
+		# correct either way. Notify an online target in the callback.
+		d = self._root.defer_db(self.userdb.do_friend_request, client.user_id, username, msg)
+		d.addCallback(self._friendrequest_done, client, username, msg)
+		d.addErrback(self._friend_op_failed, client, "FRIENDREQUEST")
+
+	def _friendrequest_done(self, verdict, client, username, msg):
+		# reactor-thread callback: no reactor-side DB (clientFromID is memory-only here),
+		# so no session bracket; it only sends protocol messages.
+		if client.session_id not in self._root.clients:
+			return # requester disconnected during the DB op (the request was still stored)
+		kind = verdict[0]
+		if kind == 'nouser':
+			self.out_SERVERMSG(client, "No such user.")
+			return
+		if kind == 'already_friends':
 			self.out_SERVERMSG(client, "Already friends with user.")
 			return
-		if self.is_ignored(friendRequestClient, client):
-			# don't send friend request if ignored
+		if kind == 'silent':
+			# ignored, or a request already exists - stay silent so the sender can't probe it
 			return
-		if self.userdb.has_friend_request(client.user_id, friendRequestClient.user_id):
-			# don't inform the user that there is already a friend request (so they won't be able to tell if they are being ignored or not)
-			return
-
-		self.userdb.add_friend_request(client.user_id, friendRequestClient.user_id, msg)
-		if self.clientFromID(friendRequestClient.user_id):
+		# kind == 'ok'
+		target_id = verdict[1]
+		friendRequestClient = self.clientFromID(target_id) # online only (memory)
+		if friendRequestClient:
 			if msg:
 				friendRequestClient.Send('FRIENDREQUEST userName=%s\tmsg=%s' % (client.username, msg))
 			else:
@@ -1686,17 +1697,23 @@ class Protocol:
 		if not username:
 			self.out_SERVERMSG(client, "Missing userName argument.")
 			return
+		# 3.1: verify the request exists + create the friendship + delete the request as ONE
+		# atomic DB unit off the reactor; notify an online requester in the callback.
+		d = self._root.defer_db(self.userdb.do_accept_friend_request, client.user_id, username)
+		d.addCallback(self._acceptfriend_done, client, username)
+		d.addErrback(self._friend_op_failed, client, "ACCEPTFRIENDREQUEST")
 
-		friendRequestClient = self.clientFromUsername(username, True)
-		if not self.userdb.has_friend_request(friendRequestClient.user_id, client.user_id):
+	def _acceptfriend_done(self, verdict, client, username):
+		if client.session_id not in self._root.clients:
+			return # requester disconnected during the DB op (the friendship was still created)
+		if verdict[0] == 'no_request':
 			self.out_SERVERMSG(client, "No such friend request.")
 			return
-
-		self.userdb.friend_users(client.user_id, friendRequestClient.user_id)
-		self.userdb.remove_friend_request(friendRequestClient.user_id, client.user_id)
-
+		# kind == 'ok'
+		target_id = verdict[1]
 		client.Send('FRIEND userName=%s' % username)
-		if self.clientFromID(friendRequestClient.user_id):
+		friendRequestClient = self.clientFromID(target_id) # online only (memory)
+		if friendRequestClient:
 			friendRequestClient.Send('FRIEND userName=%s' % client.username)
 
 	def in_DECLINEFRIENDREQUEST(self, client, tags):
@@ -1706,12 +1723,16 @@ class Protocol:
 		if not username:
 			self.out_SERVERMSG(client, "Missing userName argument.")
 			return
+		# 3.1: verify + delete the request as ONE atomic DB unit off the reactor.
+		d = self._root.defer_db(self.userdb.do_decline_friend_request, client.user_id, username)
+		d.addCallback(self._declinefriend_done, client)
+		d.addErrback(self._friend_op_failed, client, "DECLINEFRIENDREQUEST")
 
-		friendRequestClient = self.clientFromUsername(username, True)
-		if not self.userdb.has_friend_request(friendRequestClient.user_id, client.user_id):
-			self.out_SERVERMSG(client, "No such friend request.")
+	def _declinefriend_done(self, verdict, client):
+		if client.session_id not in self._root.clients:
 			return
-		self.userdb.remove_friend_request(friendRequestClient.user_id, client.user_id)
+		if verdict[0] == 'no_request':
+			self.out_SERVERMSG(client, "No such friend request.")
 
 	def in_UNFRIEND(self, client, tags):
 		tags = self._parseTags(tags)
@@ -1720,14 +1741,33 @@ class Protocol:
 		if not username:
 			self.out_SERVERMSG(client, "Missing userName argument.")
 			return
+		# 3.1: resolve + delete the friendship (both directions) as ONE atomic DB unit off
+		# the reactor; notify an online ex-friend in the callback.
+		d = self._root.defer_db(self.userdb.do_unfriend, client.user_id, username)
+		d.addCallback(self._unfriend_done, client, username)
+		d.addErrback(self._friend_op_failed, client, "UNFRIEND")
 
-		friendRequestClient = self.clientFromUsername(username, True)
-
-		self.userdb.unfriend_users(client.user_id, friendRequestClient.user_id)
-
+	def _unfriend_done(self, verdict, client, username):
+		if client.session_id not in self._root.clients:
+			return
+		if verdict[0] == 'nouser':
+			# the original crashed on a missing user here; reply gracefully instead
+			self.out_SERVERMSG(client, "No such user.")
+			return
+		# kind == 'ok'
+		target_id = verdict[1]
 		client.Send('UNFRIEND userName=%s' % username)
-		if self.clientFromID(friendRequestClient.user_id):
+		friendRequestClient = self.clientFromID(target_id) # online only (memory)
+		if friendRequestClient:
 			friendRequestClient.Send('UNFRIEND userName=%s' % client.username)
+
+	def _friend_op_failed(self, failure, client, op):
+		# reactor-thread errback shared by the friend mutations: a DB error means the
+		# mutation did not happen. Log it loudly and tell the requester.
+		logging.error("%s DB error for <%s>: %s" % (op, getattr(client, 'username', '?'), failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		self.out_SERVERMSG(client, "Server error processing %s." % op)
 
 	def in_FRIENDREQUESTLIST(self, client):
 		# 3.1: read off the reactor thread; worker returns plain [(user_id, msg), ...].

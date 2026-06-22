@@ -926,6 +926,64 @@ class UsersHandler:
 		users = [(req.user_id, req.msg) for req in reqs]
 		return users
 
+	# 3.1 worker units for the friend mutations. Each runs on a thread-pool worker and does
+	# the whole check-then-act as ONE uncommitted transaction: DataHandler._run_db commits it
+	# once and can safely retry the entire unit on a transient serialization error. They must
+	# NOT call the self-committing helpers above (friend_users / add_friend_request / ...),
+	# because an intermediate commit would be re-applied on retry. They take/return plain data
+	# only (ids, tuples) - never a live ORM row or an in-memory client - so they are
+	# thread-safe; the reactor-thread callback does all client notification.
+	def _user_id_from_username(self, username):
+		# cache-free, case-sensitive username -> id resolution. The offline-user cache in
+		# clientFromUsername must not be touched off the reactor thread, so query directly.
+		# db collation is case-insensitive, so require an exact match (mirrors clientFromUsername).
+		row = self.sess().query(User.id, User.username).filter(User.username == username).first()
+		if not row or row[1] != username:
+			return None
+		return row[0]
+
+	def do_friend_request(self, from_id, target_username, msg):
+		target_id = self._user_id_from_username(target_username)
+		if target_id is None:
+			return ('nouser',)
+		if self.are_friends(from_id, target_id):
+			return ('already_friends',)
+		if self.is_ignored(target_id, from_id):
+			# target ignores the sender; the ignore-set is kept in sync with this table for
+			# online users too, so the db check is correct whether the target is on- or offline
+			return ('silent',)
+		if self.has_friend_request(from_id, target_id):
+			return ('silent',)
+		self.sess().add(FriendRequest(from_id, target_id, msg))
+		return ('ok', target_id)
+
+	def do_accept_friend_request(self, accepter_id, target_username):
+		target_id = self._user_id_from_username(target_username)
+		if target_id is None:
+			return ('no_request',)
+		if not self.has_friend_request(target_id, accepter_id):
+			return ('no_request',)
+		self.sess().add(Friend(accepter_id, target_id))
+		self.sess().query(FriendRequest).filter(FriendRequest.user_id == target_id).filter(FriendRequest.friend_user_id == accepter_id).delete()
+		return ('ok', target_id)
+
+	def do_decline_friend_request(self, decliner_id, target_username):
+		target_id = self._user_id_from_username(target_username)
+		if target_id is None:
+			return ('no_request',)
+		if not self.has_friend_request(target_id, decliner_id):
+			return ('no_request',)
+		self.sess().query(FriendRequest).filter(FriendRequest.user_id == target_id).filter(FriendRequest.friend_user_id == decliner_id).delete()
+		return ('ok',)
+
+	def do_unfriend(self, user_id, target_username):
+		target_id = self._user_id_from_username(target_username)
+		if target_id is None:
+			return ('nouser',)
+		self.sess().query(Friend).filter(Friend.first_user_id == user_id).filter(Friend.second_user_id == target_id).delete()
+		self.sess().query(Friend).filter(Friend.second_user_id == user_id).filter(Friend.first_user_id == target_id).delete()
+		return ('ok', target_id)
+
 	def add_channel_message(self, channel_id, user_id, bridged_id, msg, ex_msg, date=None):
 		if date is None:
 			date = datetime.now()
