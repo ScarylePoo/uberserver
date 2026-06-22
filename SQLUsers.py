@@ -724,22 +724,33 @@ class UsersHandler:
 			return ('taken',)
 		return ('ok', entry.id)
 
-	def rename_user(self, username, newname):
-		if newname == username:
-			return False, 'You already have that username.'
+	def do_rename_account(self, username, newname):
+		# 3.1 worker: PURE DB, ONE uncommitted transaction (_run_db owns the commit + retry).
+		# Replaces the old self-committing rename_user; returns verdict tuples and leaves cache
+		# invalidation to the reactor callback. The early uniqueness query is load-bearing for
+		# the case-insensitive
+		# collation behaviour: it matches the caller's OWN row on a case-only self-rename, so
+		# that is denied exactly as today (relying solely on the UNIQUE constraint would let a
+		# self-rename to a case variant succeed - a row's UPDATE never conflicts with itself).
+		# The IntegrityError catch handles the residual race where two concurrent renames both
+		# pass the early query: the UNIQUE(username) violation is 1062, which is NOT in _run_db's
+		# retry set, so we catch it here, roll back, and deny rather than retry a doomed write.
+		# The newname==username exact match is handled on the reactor before deferring.
 		results = self.sess().query(User).filter(User.username==newname).first()
 		if results:
-			return False, 'Username already exists.'
+			return ('denied', 'Username already exists.')
 		entry = self.sess().query(User).filter(User.username==username).first()
-		if not entry: 
-			return False, 'You don\'t seem to exist anymore. Contact an admin or moderator.'
-		entry.renames.append(Rename(username))
-		entry.username = newname
-		uid = entry.id
-		self.sess().commit()
-		self.invalidate_user_cache(uid, username)
-		self.invalidate_user_cache(username=newname)
-		return True, 'Account renamed successfully.'
+		if not entry:
+			return ('denied', 'You don\'t seem to exist anymore. Contact an admin or moderator.')
+		try:
+			entry.renames.append(Rename(username))
+			entry.username = newname
+			uid = entry.id
+			self.sess().flush() # force the UNIQUE check to fire HERE so 1062 is catchable
+		except IntegrityError:
+			self.sess().rollback()
+			return ('denied', 'Username already exists.')
+		return ('ok', uid, newname)
 
 	def save_user(self, obj):
 		# assert(isinstance(obj, User) or isinstance(obj, Client))

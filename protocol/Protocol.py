@@ -2948,14 +2948,39 @@ class Protocol:
 		if self.SayHooks.isNasty(newname):
 			self.out_FAILED(client, "RENAMEACCOUNT", "invalid nickname: %s" %(newname), True)
 			return
-			
-		good, reason = self.userdb.rename_user(client.username, newname)
-		if not good:
-			self.out_SERVERMSG(client, 'Failed to rename to <%s>: %s' % (newname, reason))
+		if newname == client.username:
+			self.out_SERVERMSG(client, 'Failed to rename to <%s>: %s' % (newname, 'You already have that username.'))
 			return
-		
+
+		# 3.1: free-check the newname and write the new username off the reactor thread as one
+		# atomic DB unit. The callback (on the reactor) invalidates the 1.2 user cache for both
+		# the old and new name, replies, and disconnects on success; it does no reactor-side DB,
+		# so it needs no session bracket.
+		d = self._root.defer_db(self.userdb.do_rename_account, client.username, newname)
+		d.addCallback(self._renameaccount_done, client, newname)
+		d.addErrback(self._renameaccount_failed, client, newname)
+
+	def _renameaccount_done(self, verdict, client, newname):
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB op
+		if verdict[0] == 'denied':
+			self.out_SERVERMSG(client, 'Failed to rename to <%s>: %s' % (newname, verdict[1]))
+			return
+		# verdict == ('ok', uid, newname): the new username is committed. Invalidate the 1.2 cache
+		# for BOTH names (old by id+name, new by name), mirroring rename_user, then notify and
+		# disconnect so the user reconnects under the new name. client.username is still the OLD
+		# name here (the rename does not mutate it in memory; the disconnect tears the client down).
+		self.userdb.invalidate_user_cache(verdict[1], client.username)
+		self.userdb.invalidate_user_cache(username=newname)
 		self.out_SERVERMSG(client, 'Your account has been renamed to <%s>. Reconnect with the new username (you will now be automatically disconnected).' % newname)
 		client.Remove('renaming')
+
+	def _renameaccount_failed(self, failure, client, newname):
+		# reactor-thread errback: a DB error means the rename did not happen.
+		logging.error("RENAMEACCOUNT DB error for <%s> -> <%s>: %s" % (getattr(client, 'username', '?'), newname, failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		self.out_SERVERMSG(client, "Server error processing RENAMEACCOUNT.")
 
 
 	def in_CHANGEPASSWORD(self, client, cur_password, new_password):
