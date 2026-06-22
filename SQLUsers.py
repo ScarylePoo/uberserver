@@ -984,6 +984,27 @@ class UsersHandler:
 		self.sess().query(Friend).filter(Friend.second_user_id == user_id).filter(Friend.first_user_id == target_id).delete()
 		return ('ok', target_id)
 
+	def _user_access_from_username(self, username):
+		# cache-free resolve returning (id, access) - the IGNORE mod/admin check needs the
+		# access string, which _user_id_from_username does not return. Mirrors that helper:
+		# case-sensitive exact match (db collation is case-insensitive, so re-check in python).
+		row = self.sess().query(User.id, User.username, User.access).filter(User.username == username).first()
+		if not row or row[1] != username:
+			return None
+		return (row[0], row[2])
+
+	def do_ignore_insert(self, user_id, ignore_user_id, reason):
+		# bare INSERT as ONE uncommitted unit (the reactor already validated). There is NO
+		# unique constraint on (user_id, ignored_user_id), so a concurrent same-target IGNORE
+		# from a second connection can still create a duplicate row; do_unignore_delete below
+		# tolerates and clears duplicates. A future migration should add the unique constraint.
+		self.sess().add(Ignore(user_id, ignore_user_id, reason))
+
+	def do_unignore_delete(self, user_id, unignore_user_id):
+		# tolerant DELETE (no .one(), unlike unignore_user) so a duplicate row from the
+		# no-unique-constraint race cannot raise MultipleResultsFound and can never be orphaned.
+		self.sess().query(Ignore).filter(Ignore.user_id == user_id).filter(Ignore.ignored_user_id == unignore_user_id).delete()
+
 	def add_channel_message(self, channel_id, user_id, bridged_id, msg, ex_msg, date=None):
 		if date is None:
 			date = datetime.now()
