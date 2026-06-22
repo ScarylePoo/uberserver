@@ -1,9 +1,6 @@
-import socket, time, datetime, sys, ip2country
-import errno
+import time, datetime, ip2country
 import logging
 
-from collections import defaultdict
-from BridgedClient import BridgedClient
 
 class Client():
 	'this object represents one server-side connected client'
@@ -196,7 +193,7 @@ class Client():
 
 		for command in commands_buffer:
 			if len(command) > flood_limits['msglength']:
-				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (msg_length_limit, command[0: 16]))
+				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (flood_limits['msglength'], command[0: 16]))
 				self.ReportFloodBreach("max message length (cmd=%s...)" % command[0: 16], len(command))
 				continue
 			self.HandleProtocolCommand(command)

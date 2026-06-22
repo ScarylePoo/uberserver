@@ -66,7 +66,7 @@ class Battle(Channel):
 
 		if self.natType > 0:
 			if client.udpport:
-				self._root.usernames[host].Send('CLIENTIPPORT %s %s %s' % (username, client.ip_address, client.udpport))
+				self._root.usernames[host].Send('CLIENTIPPORT %s %s %s' % (client.username, client.ip_address, client.udpport))
 
 		specs = 0
 		for sessionid in self.users:

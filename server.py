@@ -11,11 +11,9 @@ sys.path.append("protocol")
 sys.path.append(".")
 
 from DataHandler import DataHandler
-from Client import Client
 from NATServer import NATServer
 
-import ip2country # just to make sure it's downloaded
-import ChanServ
+import ip2country # noqa: F401  -- imported for side effect: loads/downloads the GeoIP db at import time
 import twistedserver
 
 _root = DataHandler()

@@ -9,7 +9,7 @@ import sys
 sys.argv = [sys.argv[0], 'py2exe']
 
 from distutils.core import setup
-import py2exe
+import py2exe # noqa: F401  -- imported for side effect: registers the 'py2exe' distutils command
 
 setup(
 	console = ['server.py'],

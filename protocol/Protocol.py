@@ -4,7 +4,6 @@
 import inspect
 import time
 import re
-import sys
 import socket
 import logging
 import datetime
@@ -309,7 +308,6 @@ class Protocol:
 		if client.current_battle:
 			self.in_LEAVEBATTLE(client)
 		for chan in list(client.channels):
-			channel = self._root.channels[chan]
 			self.in_LEAVE(client, chan, 'disconnected')
 			
 		user = client.username
@@ -1024,7 +1022,7 @@ class Protocol:
 		2.2: login-queue gate. Under a login storm, defer this login into a FIFO queue
 		drained at _root.login_drain_rate/sec by DataHandler.drain_login_queue(), and tell
 		the client it is queued. Otherwise spend a slot from the per-second budget and log
-		in immediately. The actual work lives in in_LOGIN_now(); this wrapper keeps the same
+		in immediately. The actual work lives in login_now(); this wrapper keeps the same
 		signature so command dispatch (which reflects on the signature) is unchanged.
 		'''
 		if self._root.login_queue or self._root.logins_this_second >= self._root.login_drain_rate:
@@ -1032,9 +1030,9 @@ class Protocol:
 			client.Send('SERVERMSG The server is busy; you are number %d in the login queue, please wait...' % len(self._root.login_queue))
 			return
 		self._root.logins_this_second += 1
-		self.in_LOGIN_now(client, username, password, cpu, local_ip, sentence_args)
+		self.login_now(client, username, password, cpu, local_ip, sentence_args)
 
-	def in_LOGIN_now(self, client, username, password, cpu='0', local_ip='', sentence_args=''):
+	def login_now(self, client, username, password, cpu='0', local_ip='', sentence_args=''):
 		'''
 		Attempt to login the active client.
 
@@ -1288,7 +1286,6 @@ class Protocol:
 			return
 		password = from_client.password
 		ip_address = from_client.ip_address
-		country_code = from_client.country_code
 		email = None # bots don't have email
 
 		good, reason = self.userdb.check_register_user(username)
@@ -1303,7 +1300,7 @@ class Protocol:
 			if not founder:
 				self.out_FAILED(client, "CREATEBOTACCOUNT", "User does not exist '%s'" % founder_username, True)
 				return
-			chan = '__battle__' + str(bot_client.user_id)
+			chan = '__battle__' + str(founder.user_id)
 			channel = Channel.Channel(self._root, chan)
 			self._root.channels[chan] = channel
 			self._root.chanserv.Handle("SAIDPRIVATE %s :register %s %s" % (client.username, chan, founder.username))
@@ -1524,7 +1521,7 @@ class Protocol:
 			self.out_FAILED(client, "UNBRIDGECLIENTFROM", "Bridged client (%s,%s) not found" % (location, external_id), True)
 			return
 		if bridgedClient.bridge_user_id != client.user_id:
-			self.out_FAILED(client, "UNBRIDGECLIENTFROM", "Bridged client <%s> is on a different bridge (got %i, expected %i)" % (bridgedClient.username, dbridgedClient.bridge_user_id, client.user_id), True)
+			self.out_FAILED(client, "UNBRIDGECLIENTFROM", "Bridged client <%s> is on a different bridge (got %i, expected %i)" % (bridgedClient.username, bridgedClient.bridge_user_id, client.user_id), True)
 			return
 			
 		bridgedClient_channels = bridgedClient.channels.copy()
@@ -1976,7 +1973,6 @@ class Protocol:
 			client.Send('JOINFAILED %s' % reason)
 			return
 
-		user = client.username
 		# FIXME: unhardcode this
 		if (client.bot or client.agent.startswith("SPADS")) and chan in ("newbies") and client.username != "ChanServ":
 			#client.Send('JOINFAILED %s No bots allowed in #%s!' %(chan, chan))
@@ -2454,7 +2450,7 @@ class Protocol:
 				client.went_ingame = None
 			if client.session_id == battle.host:
 				if client.hostport:
-					self._root.broadcast_battle('HOSTPORT %i' % client.hostport, battle.battle_id, host)
+					self._root.broadcast_battle('HOSTPORT %i' % client.hostport, battle.battle_id, client.username)
 		elif was_ingame and not client.is_ingame and client.went_ingame:
 			ingame_time = (time.time() - client.went_ingame) / 60
 			if ingame_time >= 1:
@@ -2519,7 +2515,7 @@ class Protocol:
 			self.out_FAILED(client, "GETCHANNELMESSAGES", "Can't get channel messages when not joined", True)
 			return
 		try:
-			timestamp = datetime.datetime.fromtimestamp(int(last_msg_id))
+			datetime.datetime.fromtimestamp(int(last_msg_id))
 		except:
 			self.out_FAILED(client, "GETCHANNELMESSAGES", "Invalid id", True)
 			return
@@ -2655,7 +2651,7 @@ class Protocol:
 				enabled_units.append(unit)
 		if enabled_units:
 			enabled_units = ' '.join(enabled_units)
-			self._root.broadcast_battle('ENABLEUNITS %s'%enabled_units, battle_id, client.username)
+			self._root.broadcast_battle('ENABLEUNITS %s'%enabled_units, battle.battle_id, client.username)
 
 	def in_ENABLEALLUNITS(self, client):
 		'''
@@ -3235,7 +3231,7 @@ class Protocol:
 				d = root.clients[c.session_id]
 				if d.username != c.username:
 					logging.error("missmatched username: (%s %d) (%s %d)" % (d.username, d.session_id, c.username, c.session_id))
-					cs.n_mismatch = cs.n_mismatch + 1
+					n_mismatch = n_mismatch + 1
 			
 			for username in todel:
 				del root.usernames[username]
@@ -3429,7 +3425,7 @@ class Protocol:
 		if found and not client.bot:
 			client.Send("CHANGEEMAILREQUESTDENIED another user is already registered to the email address '%s'" % newmail)
 			return
-		reason = "requested to change your email address for the account <%s> on the " + self._root.mail_identity + " lobbyserver" % client.username
+		reason = ("requested to change your email address for the account <%s> on the " + self._root.mail_identity + " lobbyserver") % client.username
 		good, reason = self.verificationdb.check_and_send(client.user_id, newmail, 4, reason)
 		if not good:
 			client.Send("CHANGEEMAILREQUESTDENIED " + reason)
@@ -3584,7 +3580,7 @@ class Protocol:
 	def in_FORCELEAVECHANNEL(self, client, chan, user, reason=''):
 		self._root.chanserv.Handle("SAIDPRIVATE %s :kick %s %s" % (client.username, chan, user))
 	def in_SETCHANNELKEY(self, client, chan, key='*'):
-		self._root.chanserv.Handle("SAIDPRIVATE %s :setkey #' + chan + ' ' + key" % (client.username, chan, key))
+		self._root.chanserv.Handle("SAIDPRIVATE %s :setkey #%s %s" % (client.username, chan, key))
 	def in_STARTTLS(self, client):
 		client.StartTLS()
 		client.flushBuffer()

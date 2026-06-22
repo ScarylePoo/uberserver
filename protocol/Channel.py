@@ -1,7 +1,5 @@
-import time
 from collections import deque
 from datetime import datetime
-from datetime import timedelta
 
 class Channel():
 	def __init__(self, root, name):

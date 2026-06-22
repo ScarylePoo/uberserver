@@ -8,12 +8,10 @@ import threading
 import traceback
 from hashlib import md5
 
-from base64 import b64decode as SAFE_DECODE_FUNC
 
 UNICODE_ENCODING = "utf-8"
 
 from base64 import b64encode as ENCODE_FUNC
-from base64 import b64decode as DECODE_FUNC
 
 NUM_CLIENTS = 1
 NUM_UPDATES = 10000

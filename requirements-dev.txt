@@ -1,0 +1,9 @@
+# Development / CI dependencies (on top of the runtime requirements).
+#
+# PyMySQL replaces mysqlclient for tests/CI: mysqlclient needs a C toolchain, while the test
+# DB URL uses the pure-Python "mysql+pymysql://" driver. requirements.txt keeps mysqlclient
+# for production parity.
+-r requirements.txt
+PyMySQL==1.2.0
+pytest
+ruff

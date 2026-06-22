@@ -6,7 +6,7 @@ import traceback
 import importlib
 import SQLUsers
 import ChanServ
-import ip2country
+import ip2country # noqa: F401  -- imported for side effect: loads/downloads the GeoIP db at import time
 import datetime
 from protocol import Protocol, Channel, Battle
 
@@ -193,13 +193,6 @@ class DataHandler:
 
 		# set up channels/battles from db
 		for name in channels:
-			channel = channels[name]
-
-			owner_user_id = None
-			client = self.userdb.clientFromID(channel['owner_user_id'])
-			if client and client.id:
-				owner_user_id = client.id
-
 			assert(name not in self.channels)
 			dbchannel = channels[name]
 			channel = Channel.Channel(self, name)
@@ -680,7 +673,7 @@ class DataHandler:
 				continue # client disconnected while queued
 			self.logins_this_second += 1
 			try:
-				self.protocol.in_LOGIN_now(client, *args)
+				self.protocol.login_now(client, *args)
 				self.session_manager.commit_guard()
 			except:
 				logging.error(traceback.format_exc())
