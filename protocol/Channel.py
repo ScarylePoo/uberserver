@@ -1,4 +1,5 @@
 import time
+from collections import deque
 from datetime import datetime
 from datetime import timedelta
 
@@ -35,6 +36,13 @@ class Channel():
 		self.bridged_ban = {} #bridged_ids
 
 		self.forwards = set() #channel_names
+
+		# 3.1: per-channel FIFO queue for deferred channel_history stores. Drained one store
+		# at a time (history_inflight guards re-entry) so the INSERTs commit in arrival order,
+		# keeping the autoincrement id order == the live broadcast order. Touched only on the
+		# reactor thread (enqueue from in_SAY*, pump from the deferred callbacks), so no lock.
+		self.history_queue = deque()
+		self.history_inflight = False
 
 
 	def db(self):
