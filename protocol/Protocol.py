@@ -1265,14 +1265,48 @@ class Protocol:
 			self.out_DENIED(client, client.username, reason)
 			return
 
+		# 3.1: verification stays on the reactor (verify self-commits, so it can't fold into the
+		# single-transaction worker). The access flip 'agreement'->'user' runs off the reactor as
+		# one atomic users-row write; the callback (on the reactor) sets access in memory, fires
+		# the moderator 'Agr:' broadcast only after the write commits, and runs the login state
+		# dump. _SendLoginInfo touches the DB on the reactor (get_ignored_user_ids), so the
+		# callback brackets it with the session guards exactly like _login_finish does.
+		d = self._root.defer_db(self.userdb.do_confirm_agreement, client.username)
+		d.addCallback(self._confirmagreement_done, client)
+		d.addErrback(self._confirmagreement_failed, client)
+
+	def _confirmagreement_done(self, uid, client):
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB write
+		if uid is None:
+			self.out_DENIED(client, client.username, "You don't seem to exist anymore. Contact an admin or moderator.")
+			return
+		try:
+			self._confirmagreement_now(uid, client)
+			self._root.session_manager.commit_guard()
+		except:
+			logging.error(traceback.format_exc())
+			self._root.session_manager.rollback_guard()
+		finally:
+			self._root.session_manager.close_guard()
+
+	def _confirmagreement_now(self, uid, client):
+		# the access write committed; flip it in memory and invalidate the 1.2 cache (the worker
+		# must not touch shared state), announce to moderators only now (so a failed/vanished
+		# write is never announced), then send the login state dump.
+		client.access = 'user'
+		self.userdb.invalidate_user_cache(uid, client.username)
 		ip_string = ""
 		if client.ip_address != client.last_ip:
 			ip_string = client.ip_address + " "
 		self.broadcast_Moderator('Agr: %s %s %s %s %s' %(client.username, ip_string, client.last_sys_id, client.last_mac_id, client.agent))
-		client.access = 'user'
-		self.userdb.save_user(client)
 		self._calc_access_status(client)
 		self._SendLoginInfo(client)
+
+	def _confirmagreement_failed(self, failure, client):
+		logging.error("CONFIRMAGREEMENT DB error for <%s>: %s" % (getattr(client, 'username', '?'), failure.getTraceback()))
+		if client.session_id in self._root.clients:
+			self.out_DENIED(client, client.username, "Server error processing CONFIRMAGREEMENT.")
 
 	def in_CREATEBOTACCOUNT(self, client, username, from_username, founder_username=None):
 		# Create a new botflagged account with a blank email & the same password as from_username
@@ -2898,16 +2932,26 @@ class Protocol:
 
 		@required.str address: The target IP address.
 		'''
-		results = self.userdb.find_ip(address)
-		for entry in results:
-			if entry.username in self._root.usernames:
-				self.out_SERVERMSG(client, '<%s> is currently bound to %s.' % (entry.username, address))
+		# 3.1: the lookup runs off the reactor; the worker materializes the live User rows to
+		# plain (username, last_login) tuples. The online/offline check reads shared memory, so
+		# it stays in the reactor callback.
+		d = self._root.defer_db(self.userdb.do_find_ip, address)
+		d.addCallback(self._findip_done, client, address)
+		d.addErrback(self._findip_failed, client, address)
+
+	def _findip_done(self, results, client, address):
+		if client.session_id not in self._root.clients:
+			return # admin disconnected during the DB call
+		for username, lastlogin in results:
+			if username in self._root.usernames:
+				self.out_SERVERMSG(client, '<%s> is currently bound to %s.' % (username, address))
 			else:
-				if entry.last_login:
-					lastlogin = entry.last_login.isoformat()
-				else:
-					lastlogin = "Unknown"
-				self.out_SERVERMSG(client, '<%s> was recently bound to %s at %s' % (entry.username, address, lastlogin))
+				self.out_SERVERMSG(client, '<%s> was recently bound to %s at %s' % (username, address, lastlogin or "Unknown"))
+
+	def _findip_failed(self, failure, client, address):
+		logging.error("FINDIP DB error for %s: %s" % (address, failure.getTraceback()))
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing FINDIP.")
 
 	def in_GETIP(self, client, username):
 		'''
@@ -2924,9 +2968,22 @@ class Protocol:
 			self.out_SERVERMSG(client, '<%s> is currently bound to %s' % (username, ip))
 			return
 
-		ip = self.userdb.get_ip(username)
+		# 3.1: only the offline branch hits the DB (get_ip returns a plain string); defer it.
+		# The online check above is pure memory and stays on the reactor.
+		d = self._root.defer_db(self.userdb.get_ip, username)
+		d.addCallback(self._getip_done, client, username)
+		d.addErrback(self._getip_failed, client, username)
+
+	def _getip_done(self, ip, client, username):
+		if client.session_id not in self._root.clients:
+			return # admin disconnected during the DB call
 		if ip:
 			self.out_SERVERMSG(client, '<%s> was recently bound to %s' % (username, ip))
+
+	def _getip_failed(self, failure, client, username):
+		logging.error("GETIP DB error for <%s>: %s" % (username, failure.getTraceback()))
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing GETIP.")
 
 	def in_RENAMEACCOUNT(self, client, newname):
 		'''
@@ -3133,7 +3190,15 @@ class Protocol:
 
 	def in_LISTBANS(self, client):
 		# send the banlist
-		banlist = self.bandb.list_bans()
+		# 3.1: list_bans() returns a plain list of dicts, so it defers cleanly; the callback only
+		# Sends, so it needs no session bracket.
+		d = self._root.defer_db(self.bandb.list_bans)
+		d.addCallback(self._listbans_done, client)
+		d.addErrback(self._listbans_failed, client)
+
+	def _listbans_done(self, banlist, client):
+		if client.session_id not in self._root.clients:
+			return # admin disconnected during the DB call
 		if banlist:
 			self.out_SERVERMSG(client, '-- Banlist --')
 			for entry in banlist:
@@ -3142,9 +3207,21 @@ class Protocol:
 			return
 		self.out_SERVERMSG(client, 'Banlist is empty')
 
+	def _listbans_failed(self, failure, client):
+		logging.error("LISTBANS DB error: %s" % failure.getTraceback())
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing LISTBANS.")
+
 	def in_LISTBLACKLIST(self, client):
 		# send the blacklist of domains for email verification
-		blacklist = self.bandb.list_blacklist()
+		# 3.1: list_blacklist() returns a plain list of dicts; defer it, callback only Sends.
+		d = self._root.defer_db(self.bandb.list_blacklist)
+		d.addCallback(self._listblacklist_done, client)
+		d.addErrback(self._listblacklist_failed, client)
+
+	def _listblacklist_done(self, blacklist, client):
+		if client.session_id not in self._root.clients:
+			return # admin disconnected during the DB call
 		if blacklist:
 			self.out_SERVERMSG(client, '-- Blacklist --')
 			for entry in blacklist:
@@ -3152,6 +3229,11 @@ class Protocol:
 			self.out_SERVERMSG(client, '-- End Blacklist--')
 			return
 		self.out_SERVERMSG(client, 'Blacklist is empty')
+
+	def _listblacklist_failed(self, failure, client):
+		logging.error("LISTBLACKLIST DB error: %s" % failure.getTraceback())
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing LISTBLACKLIST.")
 
 	def in_SETACCESS(self, client, username, access):
 		# set the access level of target user.
@@ -3186,10 +3268,24 @@ class Protocol:
 		
 	def in_LISTMODS(self, client):
 		if not 'mod' in client.accesslevels:
-			return		
-		admins, mods = self.userdb.list_mods()
+			return
+		# 3.1: the access guard stays on the reactor; list_mods() returns plain (admins, mods)
+		# strings, so the query defers and the callback only Sends.
+		d = self._root.defer_db(self.userdb.list_mods)
+		d.addCallback(self._listmods_done, client)
+		d.addErrback(self._listmods_failed, client)
+
+	def _listmods_done(self, mods_tuple, client):
+		if client.session_id not in self._root.clients:
+			return # admin disconnected during the DB call
+		admins, mods = mods_tuple
 		self.out_SERVERMSG(client, "Admins: %s" % admins)
 		self.out_SERVERMSG(client, "Mods: %s" % mods)
+
+	def _listmods_failed(self, failure, client):
+		logging.error("LISTMODS DB error: %s" % failure.getTraceback())
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing LISTMODS.")
 	
 	def in_RELOAD(self, client):
 		self.broadcast_Moderator('Reload initiated by <%s>' % client.username)
@@ -3554,11 +3650,39 @@ class Protocol:
 			client.Send("RESETPASSWORDDENIED " + reason)
 			return
 
-		self.verificationdb.reset_password(recover_client.user_id, True)
-		client.Send("RESETPASSWORDACCEPTED %s %s" % (recover_client.email, recover_client.username))
+		# 3.1: the email lookup + verification gate stay on the reactor (verify self-commits). The
+		# new password is generated HERE on the reactor and written off the reactor as one atomic
+		# users-row unit; the RAW password is emailed from the callback AFTER the write commits, so
+		# a failed or retried write never emails, and a _run_db retry re-applies the same hash.
+		uid = recover_client.user_id
+		raw, hashed = self.userdb.generate_password()
+		d = self._root.defer_db(self.userdb.do_set_password, uid, hashed)
+		d.addCallback(self._resetpassword_done, client, raw, uid)
+		d.addErrback(self._resetpassword_failed, client)
+
+	def _resetpassword_done(self, verdict, client, raw_password, uid):
+		if client.session_id not in self._root.clients:
+			return # requester disconnected during the DB write
+		if verdict[0] == 'denied':
+			client.Send("RESETPASSWORDDENIED " + verdict[1])
+			return
+		# verdict == ('ok', username, email): email the RAW password to the account owner now (on
+		# its own thread), then accept and disconnect the requester.
+		_ok, username, email = verdict
+		self.userdb.invalidate_user_cache(uid, username)
+		try:
+			thread.start_new_thread(self.verificationdb._send_reset_password_email, (email, username, raw_password,))
+		except:
+			logging.error("Failed to launch _send_reset_password_email for <%s>" % username)
+		client.Send("RESETPASSWORDACCEPTED %s %s" % (email, username))
 		self.out_SERVERMSG(client, "Your password has been reset. Please check your email account." + client.email)
 		client.Remove("")
-		
+
+	def _resetpassword_failed(self, failure, client):
+		logging.error("RESETPASSWORD DB error: %s" % failure.getTraceback())
+		if client.session_id in self._root.clients:
+			client.Send("RESETPASSWORDDENIED Server error, please try again.")
+
 	def in_RESETUSERPASSWORD(self, client, username, newmail=None):
 		# reset password, send the new password by email to the user
 		# if the user does not have an email address associated to their account, it can be added with newmail
@@ -3577,15 +3701,42 @@ class Protocol:
 		if not good and not newmail:
 			self.out_SERVERMSG(client, "User <%s> does not have a valid email address, please specify an email address to add to their account" % username)
 			return
+		add_email = None
 		if not good and newmail:
 			good_new, reason_new = self.verificationdb.valid_email_addr(newmail)
 			if not good_new:
 				self.out_SERVERMSG(client, "The email address '%s' is not valid: %s" % (newmail, reason_new))
 				return
-			recover_client.email = newmail
-			self.userdb.save_user(recover_client)
-		self.verificationdb.reset_password(recover_client.user_id, True)
-		self.out_SERVERMSG(client, "An email was sent to '%s' containing a new password for <%s>" % (recover_client.email, recover_client.username), True)
+			add_email = newmail
+
+		# 3.1: the email-add (when supplied) folds into the same off-reactor password write so the
+		# row is touched once atomically. The password is generated HERE on the reactor; the RAW
+		# value is emailed from the callback AFTER the commit (never on a failed/retried write).
+		# do_set_password catches the email-already-taken 1062 and returns a denial.
+		uid = recover_client.user_id
+		raw, hashed = self.userdb.generate_password()
+		d = self._root.defer_db(self.userdb.do_set_password, uid, hashed, add_email)
+		d.addCallback(self._resetuserpassword_done, client, raw, uid)
+		d.addErrback(self._resetuserpassword_failed, client)
+
+	def _resetuserpassword_done(self, verdict, client, raw_password, uid):
+		if client.session_id not in self._root.clients:
+			return # the admin disconnected during the DB write
+		if verdict[0] == 'denied':
+			self.out_SERVERMSG(client, verdict[1])
+			return
+		_ok, username, email = verdict
+		self.userdb.invalidate_user_cache(uid, username)
+		try:
+			thread.start_new_thread(self.verificationdb._send_reset_password_email, (email, username, raw_password,))
+		except:
+			logging.error("Failed to launch _send_reset_password_email for <%s>" % username)
+		self.out_SERVERMSG(client, "An email was sent to '%s' containing a new password for <%s>" % (email, username), True)
+
+	def _resetuserpassword_failed(self, failure, client):
+		logging.error("RESETUSERPASSWORD DB error: %s" % failure.getTraceback())
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing RESETUSERPASSWORD.")
 
 	def in_DELETEACCOUNT(self, client, username):
 		# schedule the user account for deletion; after a delay during which the account becomes inaccessible
@@ -3595,20 +3746,40 @@ class Protocol:
 			return		
 			
 		# ensure that account is not logged in while we modify it & deter use of account deletion requests for smurfing
+		# the ban + kick mutate shared state / disconnect the target, so they stay on the reactor
+		# BEFORE the scrub defers.
 		if delete_client.email:
 			self.in_BANSPECIFIC(client, delete_client.email, 28, "account deletion request scheduled")
 		self.in_KICK(client, username, "account deletion request")
-	
-		delete_client.ingame_time = 0
-		delete_client.bot = 0
-		delete_client.access = "user"
-		delete_client.email = "" # prevent account recovery
-		self.userdb.save_user(delete_client)
-		self.verificationdb.reset_password(delete_client.user_id, False)		
-		# now the account can no longer be accessed & has no ingame time or special status 
-		# -> automated deletion after 28 days
-		self.out_SERVERMSG(client, "Account deletion of <%s> scheduled by <%s>" % (delete_client.username, client.username), True)
-	
+
+		# 3.1: the scrub (zero ingame_time/bot, force access 'user', lock with a fresh password,
+		# clear email) folds the old save_user + reset_password writes into one atomic users-row
+		# write off the reactor. The locking password is generated HERE on the reactor and passed
+		# in hashed so a _run_db retry re-applies the same value (DELETEACCOUNT emails nothing, so
+		# the raw value is discarded). Keyed by user_id because delete_client may be an offline
+		# snapshot. The callback only invalidates the cache + Sends, so it needs no session bracket.
+		_raw, hashed = self.userdb.generate_password()
+		d = self._root.defer_db(self.userdb.do_scrub_account, delete_client.user_id, hashed)
+		d.addCallback(self._deleteaccount_done, client, delete_client.username)
+		d.addErrback(self._deleteaccount_failed, client, delete_client.username)
+
+	def _deleteaccount_done(self, verdict, client, username):
+		if client.session_id not in self._root.clients:
+			return # the requesting admin disconnected during the DB write
+		if verdict[0] == 'gone':
+			self.out_SERVERMSG(client, "User <%s> no longer exists" % username)
+			return
+		# verdict == ('ok', uid): the scrub committed. Invalidate the 1.2 cache (drops the stale
+		# offline snapshot carrying the old access/email) and confirm. The account can no longer
+		# be accessed & has no ingame time or special status -> automated deletion after 28 days.
+		self.userdb.invalidate_user_cache(verdict[1], username)
+		self.out_SERVERMSG(client, "Account deletion of <%s> scheduled by <%s>" % (username, client.username), True)
+
+	def _deleteaccount_failed(self, failure, client, username):
+		logging.error("DELETEACCOUNT DB error for <%s>: %s" % (username, failure.getTraceback()))
+		if client.session_id in self._root.clients:
+			self.out_SERVERMSG(client, "Server error processing DELETEACCOUNT.")
+
 	def in_RESENDVERIFICATION(self, client, newmail):
 		if not self.verificationdb.active():
 			client.Send("RESENDVERIFICATIONDENIED email verification is currently turned off, you do not need a verification code!")

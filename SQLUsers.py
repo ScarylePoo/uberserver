@@ -806,6 +806,84 @@ class UsersHandler:
 			return ('denied', "another user is already registered to the email address '%s'" % newmail)
 		return ('ok', uid, newmail)
 
+	def do_confirm_agreement(self, username):
+		# 3.1 worker: PURE DB, one uncommitted transaction (_run_db owns the commit + retry).
+		# CONFIRMAGREEMENT only flips access 'agreement'->'user', so we write ONLY that field
+		# rather than mirroring the all-field save_user (which would clobber a value a concurrent
+		# handler may have just written, the same clobber do_set_ingame_time avoids). access is
+		# not unique, so there is no 1062 path here. Returns the user id for the reactor callback
+		# to invalidate the 1.2 cache with, or None if the account vanished.
+		entry = self.sess().query(User).filter(User.username==username).first()
+		if entry is None:
+			return None
+		entry.access = 'user'
+		return entry.id
+
+	def do_scrub_account(self, user_id, hashed_password):
+		# 3.1 worker: PURE DB, one uncommitted transaction (_run_db owns the commit + retry).
+		# DELETEACCOUNT's account scrub, folding the old save_user + reset_password writes into a
+		# single atomic users-row write: zero ingame_time/bot, force access 'user', lock the
+		# account with a fresh password (generated on the reactor and passed in hashed so a
+		# _run_db retry re-applies the SAME value - never regenerated, the MYSTATUS idempotency
+		# precedent), and clear the email so the account cannot be recovered. email is set to
+		# NULL, not '': users.email is UNIQUE, so '' on a second deleted account would collide
+		# with a first that still holds '' (1062); NULL is exempt from UNIQUE and equally blocks
+		# recovery, matching the REGISTER email=None precedent. flush() forces any residual
+		# integrity error to fire HERE. Keyed by user_id because the caller may hold an offline
+		# snapshot. Returns ('ok', uid), or ('gone',) if the account vanished.
+		entry = self.sess().query(User).filter(User.id==user_id).first()
+		if entry is None:
+			return ('gone',)
+		entry.ingame_time = 0
+		entry.bot = 0
+		entry.access = 'user'
+		entry.email = None
+		entry.password = hashed_password
+		self.sess().flush()
+		return ('ok', entry.id)
+
+	def do_set_password(self, user_id, hashed_password, new_email=None):
+		# 3.1 worker: PURE DB, one uncommitted transaction (_run_db owns the commit + retry).
+		# Shared by RESETPASSWORD and RESETUSERPASSWORD: writes a fresh password (generated on
+		# the reactor and passed in hashed so a _run_db retry re-applies the SAME value rather
+		# than regenerating; the RAW password and the SMTP send stay in the reactor callback, so
+		# a failed or retried write never emails). RESETUSERPASSWORD's add-email path also passes
+		# new_email; users.email is UNIQUE, so flush() forces a 1062 to fire HERE where we catch
+		# it, roll back and deny rather than letting _run_db retry a doomed write (1062 is not in
+		# its retry set). Keyed by user_id (the caller may hold an offline snapshot). Returns
+		# ('ok', username, email) on success, or ('denied', reason) if the account vanished or
+		# the new email is already taken.
+		entry = self.sess().query(User).filter(User.id==user_id).first()
+		if entry is None:
+			return ('denied', "User no longer exists")
+		try:
+			entry.password = hashed_password
+			if new_email is not None:
+				entry.email = new_email
+			uname = entry.username
+			email = entry.email
+			self.sess().flush()
+		except IntegrityError:
+			self.sess().rollback()
+			return ('denied', "another user is already registered to the email address '%s'" % new_email)
+		return ('ok', uname, email)
+
+	def generate_password(self):
+		# reactor-side helper (NO DB): mint a fresh random password ONCE and return (raw, hashed).
+		# The hashed value goes to the do_set_password / do_scrub_account worker so a _run_db retry
+		# re-applies the SAME value rather than regenerating it; the raw value is emailed from the
+		# reactor callback after the write commits. Mirrors VerificationsHandler.reset_password's
+		# generation so the password format is unchanged.
+		char_set = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890!£$%^&*?"
+		raw = ""
+		for i in range(0, 10):
+			raw += random.choice(char_set)
+		hash = hashlib.md5()
+		hash.update(str.encode(raw))
+		hashed = base64.b64encode(hash.digest()).decode()
+		assert(self._root.protocol._validPasswordSyntax(hashed))
+		return raw, hashed
+
 	def get_user_id_with_email(self, email):
 		if email == '':
 			return False, 'Email address is blank'
@@ -849,6 +927,13 @@ class UsersHandler:
 	def find_ip(self, ip):
 		results = self.sess().query(User).filter(User.last_ip==ip)
 		return results
+
+	def do_find_ip(self, ip):
+		# 3.1 worker: PURE DB. find_ip() returns live, session-bound User rows (a Query);
+		# materialize them to plain (username, last_login-isoformat-or-None) tuples HERE so the
+		# reactor callback never touches a row bound to this worker's session. The online/offline
+		# distinction (username in usernames) and the SERVERMSG formatting stay on the reactor.
+		return [(u.username, u.last_login.isoformat() if u.last_login else None) for u in self.find_ip(ip)]
 
 	def get_ip(self, username):
 		entry = self.sess().query(User).filter(User.username==username).first()
