@@ -1,4 +1,4 @@
-import inspect, sys, os, types, time, string, logging
+import time, string, logging
 from datetime import datetime
 from datetime import timedelta
 
@@ -141,8 +141,6 @@ def _spam_rec(client, chan, msg):
 		client.lastsaid[chan][now].append(msg)
 
 def hook_SAY(self, client, channel, msg):
-	username = client.username
-
 	if channel.isMuted(client): return msg # client is muted, no use doing anything else
 	if channel.antispam and not channel.isOp(client): # don't apply antispam to ops
 		_spam_rec(client, channel.name, msg)

@@ -1,0 +1,13 @@
+# Ruff configuration for uberserver CI linting.
+#
+# We deliberately lint only a high-signal subset. Ruff's default ruleset reports ~9,500
+# violations on this legacy codebase, almost entirely its own established style idiom (tabs,
+# "x; y" one-line statements, bare excepts). Blocking CI on those would be pure noise.
+#
+# "F" (pyflakes) + "E9" (syntax errors) is the "real bug" class: unused imports, undefined
+# names (latent NameErrors), unused variables, %-format arg-count mismatches, syntax errors.
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F", "E9"]

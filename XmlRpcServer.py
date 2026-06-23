@@ -15,7 +15,7 @@ import traceback
 import dbconfig
 from logging.handlers import TimedRotatingFileHandler
 
-from SQLUsers import User, Rename, Login, Ban
+from SQLUsers import User, Rename, Login
 import SQLUsers
 import sqlalchemy
 import datetime

@@ -13,7 +13,7 @@ import _thread as thread
 
 	
 try:
-	from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, ForeignKey, Boolean, Text, DateTime, ForeignKeyConstraint, UniqueConstraint
+	from sqlalchemy import Table, Column, Integer, String, MetaData, ForeignKey, Boolean, Text, DateTime, UniqueConstraint
 	from sqlalchemy.orm import mapper, sessionmaker, relation, scoped_session
 	from sqlalchemy.exc import IntegrityError
 except ImportError as e:
@@ -605,7 +605,7 @@ class UsersHandler:
 	# that.
 
 	def precheck_login(self, username, password, ip):
-		# auth + ban check, mirroring the in_LOGIN_now order: check_login_user first,
+		# auth + ban check, mirroring the login_now order: check_login_user first,
 		# and only check the ban if the credentials are valid (matching the original
 		# control flow, where a failed credential check returns before the ban query).
 		# Returns plain values; the live User row from check_banned stays in this thread.
@@ -891,9 +891,6 @@ class UsersHandler:
 		dbuser = response.first()
 		if not dbuser:
 			return False, 'No user with email address %s was found' % email
-		for entry in response: # pick oldest with a valid date, if multiple choices
-			if (entry.register_date and dbuser.register_date and entry.register_date < dbuser.register_date) or not dbuser.register_date:
-				db_user = entry
 		return True, dbuser.id
 
 	def confirm_agreement(self, client):
@@ -1177,14 +1174,14 @@ class UsersHandler:
 		# [[date, username, msg, id], ...]
 		res = self.sess().query(ChannelHistory.time, ChannelHistory.msg, ChannelHistory.ex_msg, User.username, BridgedUser.external_username, BridgedUser.location, ChannelHistory.id).filter(ChannelHistory.channel_id == channel_id).filter(ChannelHistory.id > last_msg_id).join(User, isouter=True).join(BridgedUser, isouter=True).order_by(ChannelHistory.id).all()
 		msgs = []
-		for (time, msg, ex_msg, username, external_username, location, id) in res:
+		for (htime, msg, ex_msg, username, external_username, location, id) in res:
 			if not username:
-				msgs.append((time, "?", msg, ex_msg, id))
+				msgs.append((htime, "?", msg, ex_msg, id))
 			elif external_username:
 				bridged_username = external_username + ":" + location
-				msgs.append((time, bridged_username, msg, ex_msg, id))
+				msgs.append((htime, bridged_username, msg, ex_msg, id))
 			else:
-				msgs.append((time, username, msg, ex_msg, id))				
+				msgs.append((htime, username, msg, ex_msg, id))				
 		return msgs
 
 class OfflineBridgedClient():
@@ -1234,7 +1231,6 @@ class BridgedUsersHandler:
 		entry = BridgedUser(location, external_id, external_username, now)
 		self.sess().add(entry)
 		self.sess().commit()
-		bridgedUser = self.sess().query(BridgedUser).filter(BridgedUser.external_id == external_id).filter(BridgedUser.location == location).first()
 		return entry
 
 	def bridge_user(self, location, external_id, external_username):
@@ -1555,7 +1551,7 @@ class VerificationsHandler:
 		try:
 			thread.start_new_thread(self._send, (entry.email, entry.code, entry.reason, entry.expiry))
 		except:
-			logging.error('Failed to launch VerificationHandler._send: %s, %s, %s' % (entry, reason, wait_duration))
+			logging.error('Failed to launch VerificationHandler._send: %s, %s, %s' % (entry, entry.reason, entry.expiry))
 			return
 		dbuser = self.sess().query(User).filter(User.id == entry.user_id).first()
 		logging.info('Sent verification code for <%s> to %s' % (dbuser.username, entry.email)) 
@@ -1885,7 +1881,7 @@ class ChannelsHandler:
 		channel.id = entry.id
 
 	def unRegister(self, channel):
-		entry = self.sess().query(Channel).filter(Channel.name == channel.name).delete()
+		self.sess().query(Channel).filter(Channel.name == channel.name).delete()
 		self.sess().commit()
 
 	def registered(self, channel):

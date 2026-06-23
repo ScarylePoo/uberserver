@@ -1,4 +1,4 @@
-import time, traceback, logging
+import traceback, logging
 from datetime import timedelta
 from datetime import datetime
 from Client import Client
@@ -349,7 +349,7 @@ class ChanServClient(Client):
 			if not target_username:
 				return '#%s: You must specify a user to unmute' % chan
 			if ':' in target_username:
-				return '#%s: For bridged users, use !ban/!unban' % (chan, chan)
+				return '#%s: For bridged users, use !ban/!unban' % chan
 			target = self._root.clientFromUsername(target_username, True)
 			if not target or not target.user_id in channel.mutelist:
 				return '#%s: User <%s> not found in mutelist' % (chan, target_username)
@@ -436,7 +436,7 @@ class ChanServClient(Client):
 				return '#%s: <%s> unbanned' % (chan, target.username)
 			target = self._root.clientFromUsername(target_username, True)
 			if not target:
-				return "#%s: User 'target_username' does not exist" % (chan, target.username)
+				return "#%s: User '%s' does not exist" % (chan, target_username)
 			if not target.user_id in channel.ban:
 				return '#%s: User <%s> not found in banlist' % (chan, target.username)
 			channel.unbanUser(client, target)

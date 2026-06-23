@@ -2,8 +2,6 @@ from twisted.internet.protocol import Factory
 from twisted.internet import protocol
 from twisted.internet import reactor
 from twisted.protocols.policies import TimeoutMixin
-from protocol import Protocol
-import DataHandler
 import Client
 import traceback
 import logging
@@ -107,7 +105,7 @@ class Chat(protocol.Protocol, Client.Client, TimeoutMixin):
 				self.resetTimeout() #reset timeout for authentificated users when data is received
 			self.Handle(data.decode("utf-8"))
 			self._root.session_manager.commit_guard()			
-		except UnicodeDecodeError as e:
+		except UnicodeDecodeError:
 			self.Remove("Invalid utf-8 data received, closing connection")
 			self._root.session_manager.rollback_guard()
 		except Exception as e:

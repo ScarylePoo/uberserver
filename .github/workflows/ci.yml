@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint (pyflakes + syntax errors)
+        run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build deps for mysqlclient
+        run: sudo apt-get update && sudo apt-get install -y default-libmysqlclient-dev pkg-config
+      - name: Install Python dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Standalone self-tests (migrated from Travis)
+        run: |
+          python protocol/Protocol.py
+          python SQLUsers.py
+      # NOTE: the pytest suite under tests/ (worker + e2e tiers, plus its conftest fixtures and a
+      # MariaDB service) is committed and works, but is NOT gated here yet. Several tiers exercise
+      # Phase-3 slices whose implementations live in other, not-yet-merged PRs, and the e2e tier
+      # needs per-test DB isolation before it is a reliable blocking gate. A follow-up PR wires
+      # `pytest tests/` (with the MariaDB service) into CI once those slices land.

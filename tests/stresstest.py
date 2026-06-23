@@ -11,7 +11,6 @@ import sys
 
 from hashlib import md5
 
-from base64 import b64decode as SAFE_DECODE_FUNC
 
 import base64
 
