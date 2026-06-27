@@ -88,6 +88,7 @@ class DataHandler:
 		# receiving a large login state-dump - drains in milliseconds and is never affected.
 		self.write_buffer_highwater = 256 * 1024  # bytes queued before backpressure trips
 		self.write_buffer_grace = 30              # seconds a client may stay backed up before disconnect
+		self.backpressured_clients = 0            # live count of clients currently over the high-water mark
 
 		self.sqlurl = 'sqlite:///server.db'
 		self.nextbattle = 0
@@ -119,12 +120,14 @@ class DataHandler:
 		self.bridged_ids = {} #bridged_id->bridgedClient
 		self.bridged_usernames = {} #bridgeUsername->bridgedClient
 
-		# 2.2: login queue - smooths login storms (server restart, scheduled events) so
-		# concurrent logins don't all hit the DB at once. Logins beyond login_drain_rate
-		# per second are queued FIFO and drained by drain_login_queue() (a 1s LoopingCall).
-		self.login_queue = collections.deque() # (client, login_args) awaiting login under load
-		self.login_drain_rate = 10             # max logins processed per second
-		self.logins_this_second = 0            # budget shared by inline + drained logins; reset each second
+		# 2.2 / 3.1: adaptive login queue. Phase 3 moved all login DB I/O off the reactor,
+		# so the old fixed 10/sec drain rate is gone: logins now run inline as fast as the
+		# send path stays healthy. When more than login_backpressure_limit clients are
+		# simultaneously backed up on their write buffers (the 2.3 producer signal), new
+		# logins are queued FIFO and drained by drain_login_queue() (a 1s LoopingCall) once
+		# the backpressure clears. Under normal load the queue stays empty.
+		self.login_queue = collections.deque() # (client, login_args) awaiting login under backpressure
+		self.login_backpressure_limit = 50     # paused-producer count above which login admission pauses
 
 		# rate limits
 		self.nonres_registrations = set() #user_id
@@ -661,17 +664,21 @@ class DataHandler:
 		finally:
 			self.session_manager.close_guard()
 	
+	def login_backpressured(self):
+		# 2.3 producer signal: True when enough clients are simultaneously backed up on
+		# their write buffers that admitting more logins (each emits a large state-dump)
+		# would make it worse. A handful of individually-stalled readers does not count.
+		return self.backpressured_clients > self.login_backpressure_limit
+
 	def drain_login_queue(self):
-		# 2.2: reset the per-second login budget, then process queued logins up to the
-		# drain rate. Runs on the reactor thread (1s LoopingCall) so it shares login_queue
-		# / logins_this_second with in_LOGIN without locking. Each login gets its own
-		# session commit/rollback/close, mirroring the per-request guards in dataReceived.
-		self.logins_this_second = 0
-		while self.login_queue and self.logins_this_second < self.login_drain_rate:
+		# 2.2 / 3.1: drain queued logins while the send path is healthy, re-checking
+		# backpressure each iteration. Runs on the reactor thread (1s LoopingCall) so it
+		# shares login_queue with in_LOGIN without locking. Each login gets its own session
+		# commit/rollback/close, mirroring the per-request guards in dataReceived.
+		while self.login_queue and not self.login_backpressured():
 			client, args = self.login_queue.popleft()
 			if client.session_id not in self.clients:
 				continue # client disconnected while queued
-			self.logins_this_second += 1
 			try:
 				self.protocol.login_now(client, *args)
 				self.session_manager.commit_guard()

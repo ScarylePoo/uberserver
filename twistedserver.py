@@ -8,7 +8,14 @@ import logging
 import resource
 
 maxhandles, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-maxclients = int(maxhandles / 2)
+# Reserve a fixed number of descriptors for non-client use (DB connection pool, listening
+# sockets, log files, GeoIP db, transient outbound HTTP) instead of a proportional half.
+# A connected player costs exactly one fd (startTLS upgrades the same socket in place; the
+# NAT server is one shared UDP socket), so the overhead is roughly constant regardless of
+# player count -- dividing by two threw away half the usable slots. Raise the player cap by
+# raising RLIMIT_NOFILE (LimitNOFILE= in the systemd unit), not by changing this reserve.
+FD_RESERVE = 256
+maxclients = max(0, maxhandles - FD_RESERVE)
 
 class Chat(protocol.Protocol, Client.Client, TimeoutMixin):
 
@@ -68,6 +75,8 @@ class Chat(protocol.Protocol, Client.Client, TimeoutMixin):
 	def pauseProducing(self):
 		if self._write_overflow_call is None:
 			self._write_overflow_call = reactor.callLater(self.root.write_buffer_grace, self._writeBufferOverflow)
+			# feed the adaptive login-drain backpressure signal (DataHandler.login_backpressured)
+			self.root.backpressured_clients += 1
 
 	def resumeProducing(self):
 		self._cancelWriteOverflow()
@@ -80,9 +89,14 @@ class Chat(protocol.Protocol, Client.Client, TimeoutMixin):
 			if self._write_overflow_call.active():
 				self._write_overflow_call.cancel()
 			self._write_overflow_call = None
+			self.root.backpressured_clients -= 1
 
 	def _writeBufferOverflow(self):
+		# grace expired while still paused: clear the paused state (and its backpressure
+		# count) before dropping the stalled reader. connectionLost -> _cancelWriteOverflow
+		# then sees None and won't double-decrement.
 		self._write_overflow_call = None
+		self.root.backpressured_clients -= 1
 		logging.info("disconnecting slow/stalled reader %s (%s): write buffer over %i bytes for %is" % (
 			getattr(self, 'username', '') or '?', self.ip_address, self.root.write_buffer_highwater, self.root.write_buffer_grace))
 		self.transport.abortConnection()

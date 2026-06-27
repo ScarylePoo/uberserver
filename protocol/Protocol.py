@@ -1019,17 +1019,17 @@ class Protocol:
 
 	def in_LOGIN(self, client, username, password, cpu='0', local_ip='', sentence_args=''):
 		'''
-		2.2: login-queue gate. Under a login storm, defer this login into a FIFO queue
-		drained at _root.login_drain_rate/sec by DataHandler.drain_login_queue(), and tell
-		the client it is queued. Otherwise spend a slot from the per-second budget and log
-		in immediately. The actual work lives in login_now(); this wrapper keeps the same
-		signature so command dispatch (which reflects on the signature) is unchanged.
+		2.2 / 3.1: adaptive login-queue gate. Phase 3 made login_now() run its DB work off
+		the reactor, so logins are admitted inline as fast as the send path stays healthy.
+		Only under write-buffer backpressure (or while a queue is already draining, to keep
+		FIFO order) is the login deferred into the queue drained by
+		DataHandler.drain_login_queue(). The actual work lives in login_now(); this wrapper
+		keeps the same signature so command dispatch (which reflects on it) is unchanged.
 		'''
-		if self._root.login_queue or self._root.logins_this_second >= self._root.login_drain_rate:
+		if self._root.login_queue or self._root.login_backpressured():
 			self._root.login_queue.append((client, (username, password, cpu, local_ip, sentence_args)))
 			client.Send('SERVERMSG The server is busy; you are number %d in the login queue, please wait...' % len(self._root.login_queue))
 			return
-		self._root.logins_this_second += 1
 		self.login_now(client, username, password, cpu, local_ip, sentence_args)
 
 	def login_now(self, client, username, password, cpu='0', local_ip='', sentence_args=''):
@@ -1117,20 +1117,23 @@ class Protocol:
 		d.addCallback(self._login_finish, client, username, agent, local_ip)
 		d.addErrback(self._login_failed, client, username)
 
-	def _login_finish(self, dbuser, client, username, agent, local_ip):
-		# reactor-thread callback after do_login. dbuser is a plain OfflineClient snapshot,
-		# or None if the account vanished between the auth check and the write.
+	def _login_finish(self, result, client, username, agent, local_ip):
+		# reactor-thread callback after do_login. result is (snapshot, ignored_user_ids):
+		# a plain OfflineClient snapshot plus the user's ignore list (both fetched on the
+		# worker thread), or (None, []) if the account vanished between the auth check and
+		# the write.
+		dbuser, ignored = result
 		if client.session_id not in self._root.clients:
 			return # client disconnected during the DB call
 		if dbuser is None:
 			self.out_DENIED(client, username, 'Invalid username or password')
 			return
 		# This callback runs outside dataReceived's per-request session guard, but the
-		# work below can still touch the DB on the reactor thread (_SendLoginInfo's
-		# get_ignored_user_ids, and the moderator in_JOIN). Bracket it the same way
-		# dataReceived does so the reactor session is committed/closed and never leaks.
+		# work below can still touch the DB on the reactor thread (the moderator in_JOIN).
+		# Bracket it the same way dataReceived does so the reactor session is
+		# committed/closed and never leaks.
 		try:
-			self._login_finish_now(dbuser, client, username, agent, local_ip)
+			self._login_finish_now(dbuser, client, username, agent, local_ip, ignored)
 			self._root.session_manager.commit_guard()
 		except:
 			logging.error(traceback.format_exc())
@@ -1138,7 +1141,7 @@ class Protocol:
 		finally:
 			self._root.session_manager.close_guard()
 
-	def _login_finish_now(self, dbuser, client, username, agent, local_ip):
+	def _login_finish_now(self, dbuser, client, username, agent, local_ip, ignored):
 		# invalidate the offline-user cache here, on the reactor thread (the worker must
 		# not mutate shared state)
 		self.userdb.invalidate_user_cache(dbuser.id, dbuser.username)
@@ -1186,7 +1189,7 @@ class Protocol:
 			return
 
 		self._root.client_LoginStats(client)
-		self._SendLoginInfo(client)
+		self._SendLoginInfo(client, ignored)
 
 	def _login_failed(self, failure, client, username):
 		# reactor-thread errback: a DB error during login. Log it and tell the client
@@ -1195,7 +1198,7 @@ class Protocol:
 		if client.session_id in self._root.clients:
 			self.out_DENIED(client, username, 'Login failed due to a server error, please try again.')
 
-	def _SendLoginInfo(self, client):
+	def _SendLoginInfo(self, client, ignored=None):
 		self._calc_status(client, 0)
 		client.logged_in = True
 		client.buffersend = True # enqeue all sends to client made from other threads until server state is send
@@ -1204,8 +1207,11 @@ class Protocol:
 		self._root.usernames[client.username] = client
 
 		logging.info('[%s] <%s> logged in (access=%s).' % (client.session_id, client.username, client.access))
-		ignoreList = self.userdb.get_ignored_user_ids(client.user_id)
-		client.ignored = {ignoredUserId:True for ignoredUserId in ignoreList}
+		# the login path prefetches the ignore list off the reactor (in do_login); the
+		# CONFIRMAGREEMENT path doesn't, so fall back to a reactor-thread query there.
+		if ignored is None:
+			ignored = self.userdb.get_ignored_user_ids(client.user_id)
+		client.ignored = {ignoredUserId:True for ignoredUserId in ignored}
 
 		client.RealSend('ACCEPTED %s' % client.username)
 

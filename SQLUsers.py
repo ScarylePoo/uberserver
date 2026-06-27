@@ -618,12 +618,15 @@ class UsersHandler:
 	def do_login(self, username, ip, agent, last_sys_id, last_mac_id, local_ip, country):
 		# write the login: re-load the user (the precheck row belonged to another
 		# thread/session and cannot cross threads), update last_* fields, append the
-		# Login record, commit, and return a plain OfflineClient snapshot. Returns None
-		# if the user vanished (rename/delete) between precheck and here. Cache
-		# invalidation is left to the reactor callback (shared-state mutation).
+		# Login record, commit, and return a (snapshot, ignored_user_ids) pair. The
+		# ignore list is fetched here, on this worker thread, so the reactor callback
+		# (_SendLoginInfo) does not block the event loop on a synchronous
+		# get_ignored_user_ids query. Returns (None, []) if the user vanished
+		# (rename/delete) between precheck and here. Cache invalidation is left to the
+		# reactor callback (shared-state mutation).
 		dbuser = self.sess().query(User).filter(User.username == username).first()
 		if not dbuser:
-			return None
+			return None, []
 		now = datetime.now()
 		dbuser.logins.append(Login(now, dbuser.id, ip, agent, last_sys_id, last_mac_id, local_ip, country))
 		dbuser.last_ip = ip
@@ -633,8 +636,9 @@ class UsersHandler:
 		dbuser.last_login = now
 		# snapshot while the row is attached and current, before commit expires it
 		snapshot = OfflineClient(dbuser)
+		ignored = self.get_ignored_user_ids(dbuser.id)
 		self.sess().commit()
-		return snapshot
+		return snapshot, ignored
 
 	def do_change_password(self, username, cur_password, new_password):
 		# 3.1 worker: re-verify the current password and write the new one as ONE
