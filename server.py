@@ -48,7 +48,10 @@ except:
 	logging.info('Exception caught, exiting...')
 
 try:
-	reactor.listenTCP(_root.port, twistedserver.ChatFactory(_root))
+	# backlog: size the kernel accept queue well above Twisted's default of 50 so a burst
+	# of simultaneous connections (server restart, scheduled event) isn't dropped before
+	# accept() runs. Effective value is capped by the OS net.core.somaxconn (see docs/ops).
+	reactor.listenTCP(_root.port, twistedserver.ChatFactory(_root), backlog=1024)
 	print('Started lobby server!')
 	print('Connect the lobby client to')
 	print('  public:  %s:%d' %(_root.online_ip, _root.port))

@@ -12,6 +12,10 @@ ExecStart=/home/lobbydev/uberserver/server.py -g args.txt
 SyslogIdentifier=uberserver
 Restart=always
 RestartSec=3
+# Player capacity is gated by the file-descriptor limit: each connected client costs one
+# fd, and twistedserver.py caps clients at (RLIMIT_NOFILE - 256). The default soft limit of
+# 1024 caps the server at ~768 players; raise it here to host more.
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
