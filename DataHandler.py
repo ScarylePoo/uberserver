@@ -430,6 +430,14 @@ class DataHandler:
 					self.pool_size = poolsize
 				except (IndexError, ValueError) as e:
 					print('Invalid --poolsize specification, using default %d: %s' % (self.pool_size, e))
+			elif arg == 'maxthreads':
+				try:
+					maxthreads = int(argp[0])
+					if maxthreads < 1:
+						raise ValueError('max threads must be >= 1')
+					self.max_threads = maxthreads
+				except (IndexError, ValueError) as e:
+					print('Invalid --maxthreads specification, using default %d: %s' % (self.max_threads, e))
 			elif arg in ['a', 'agreement']:
 				try:
 					self.argeementfile = argp[0]
@@ -931,4 +939,3 @@ class DataHandler:
 		ret = 'Reload successful'
 		logging.info(ret)
 		return ret
-
