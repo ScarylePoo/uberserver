@@ -13,7 +13,7 @@ import _thread as thread
 
 	
 try:
-	from sqlalchemy import Table, Column, Integer, String, MetaData, ForeignKey, Boolean, Text, DateTime, UniqueConstraint
+	from sqlalchemy import Table, Column, Integer, String, MetaData, ForeignKey, Boolean, Text, DateTime, UniqueConstraint, Index
 	from sqlalchemy.orm import mapper, sessionmaker, relation, scoped_session
 	from sqlalchemy.exc import IntegrityError
 except ImportError as e:
@@ -25,6 +25,13 @@ except ImportError as e:
 
 
 metadata = MetaData()
+
+# Offline direct messages. The TTL matches channel_history's retention: the server holds
+# private message content for as long as it holds public chat, and no longer. Past that
+# the content is dropped and only a contentless tombstone survives, so a returning user
+# still learns someone tried to reach them.
+OFFLINE_MSG_TTL_DAYS = 14
+OFFLINE_MSG_MAX_PER_PAIR = 50 # queued content messages one sender may hold for one recipient
 ##########################################
 users_table = Table('users', metadata,
 	Column('id', Integer, primary_key=True),
@@ -275,6 +282,40 @@ class ChannelHistory(object):
 	def __repr__(self):
 		return "<ChannelHistory('%s')>" % self.channel_id
 mapper(ChannelHistory, channelshistory_table)
+##########################################
+# Direct messages sent to a user who was offline, held until they next log in and then
+# deleted. Content is transient by design: it is dropped after OFFLINE_MSG_TTL_DAYS, or
+# when a sender exceeds OFFLINE_MSG_MAX_PER_PAIR queued messages for one recipient.
+#
+# A row with msg IS NULL is a TOMBSTONE: the content is gone but the recipient is still
+# told that someone tried to reach them, so they know to ask rather than never finding
+# out. There is at most one tombstone per (sender, recipient) pair - dropped_count says
+# how many messages it stands for and time is the newest one's send time. Without that
+# collapse, 50 expiring messages would become 50 tombstones.
+offlinemessages_table = Table('offline_messages', metadata,
+	Column('id', Integer, primary_key=True),
+	Column('sender_user_id', Integer, ForeignKey('users.id', onupdate='CASCADE', ondelete='CASCADE')),
+	Column('recipient_user_id', Integer, ForeignKey('users.id', onupdate='CASCADE', ondelete='CASCADE')),
+	Column('time', DateTime),
+	Column('msg', Text, nullable=True), # NULL == tombstone
+	Column('ex_msg', Boolean),
+	Column('dropped_count', Integer, default=0), # only meaningful on a tombstone
+	Index('ix_offline_messages_recipient', 'recipient_user_id', 'id'), # login fetch
+	Index('ix_offline_messages_pair', 'sender_user_id', 'recipient_user_id'), # per-pair cap count
+	mysql_charset='utf8',
+	)
+class OfflineMessage(object):
+	def __init__(self, sender_user_id, recipient_user_id, time, msg, ex_msg, dropped_count=0):
+		self.sender_user_id = sender_user_id
+		self.recipient_user_id = recipient_user_id
+		self.time = time
+		self.msg = msg
+		self.ex_msg = ex_msg
+		self.dropped_count = dropped_count
+
+	def __repr__(self):
+		return "<OfflineMessage(%s -> %s, %s)>" % (self.sender_user_id, self.recipient_user_id, "tombstone" if self.msg is None else "content")
+mapper(OfflineMessage, offlinemessages_table)
 ##########################################
 channelops_table = Table('channel_ops', metadata,
 	Column('id', Integer, primary_key=True),
@@ -1164,6 +1205,75 @@ class UsersHandler:
 		# tolerant DELETE (no .one(), unlike unignore_user) so a duplicate row from the
 		# no-unique-constraint race cannot raise MultipleResultsFound and can never be orphaned.
 		self.sess().query(Ignore).filter(Ignore.user_id == user_id).filter(Ignore.ignored_user_id == unignore_user_id).delete()
+
+	# --- offline direct messages (cache-free workers; see the offline_messages table) ---
+	# All of these are ONE uncommitted transaction: _run_db owns the commit and retries the
+	# whole unit on a serialization error, so they must not self-commit.
+
+	def _user_id_bot_from_username(self, username):
+		# cache-free resolve returning (id, bot). Mirrors _user_id_from_username but also
+		# returns the bot flag, which the offline-message path needs to refuse bots.
+		# db collation is case-insensitive, so re-check the case in python.
+		row = self.sess().query(User.id, User.username, User.bot).filter(User.username == username).first()
+		if not row or row[1] != username:
+			return None
+		return (row[0], row[2])
+
+	def _bump_offline_tombstone(self, sender_id, recipient_id, when, count):
+		# Upsert the single (sender, recipient) tombstone: one row stands for every message
+		# from that sender that the recipient will never see, whether dropped by the cap or
+		# expired by the TTL. Keeps the newest send time so the recipient can tell roughly
+		# when they were being messaged.
+		tomb = self.sess().query(OfflineMessage).filter(OfflineMessage.recipient_user_id == recipient_id).filter(OfflineMessage.sender_user_id == sender_id).filter(OfflineMessage.msg == None).first()
+		if tomb is None:
+			self.sess().add(OfflineMessage(sender_id, recipient_id, when, None, False, count))
+			return
+		tomb.dropped_count = (tomb.dropped_count or 0) + count
+		if when > tomb.time:
+			tomb.time = when
+
+	def do_enqueue_offline_message(self, sender_id, recipient_username, msg, ex_msg):
+		# ONE unit: resolve -> refuse bots -> honour the recipient's ignore list -> enforce
+		# the per-pair cap -> insert. Returns a verdict tuple for the reactor callback.
+		resolved = self._user_id_bot_from_username(recipient_username)
+		if resolved is None:
+			return ('nouser',)
+		recipient_id, bot = resolved
+		if bot:
+			# Bots cannot receive offline messages at all: a queue of commands delivered in
+			# one burst at login would flood an autohost, which is abuse waiting to happen.
+			return ('bot',)
+		if recipient_id == sender_id:
+			return ('nouser',) # a user is never offline to themselves; nothing to queue
+		if self.is_ignored(recipient_id, sender_id):
+			# The recipient ignores the sender. Never write the row, and report success:
+			# ignore status must not be observable by probing.
+			return ('ok', recipient_id)
+		now = datetime.now()
+		n = self.sess().query(OfflineMessage).filter(OfflineMessage.recipient_user_id == recipient_id).filter(OfflineMessage.sender_user_id == sender_id).filter(OfflineMessage.msg != None).count()
+		if n >= OFFLINE_MSG_MAX_PER_PAIR:
+			# At the cap: drop the oldest content to make room, and account for it in the
+			# tombstone so the loss is reported rather than silent.
+			oldest = self.sess().query(OfflineMessage).filter(OfflineMessage.recipient_user_id == recipient_id).filter(OfflineMessage.sender_user_id == sender_id).filter(OfflineMessage.msg != None).order_by(OfflineMessage.id).first()
+			dropped_time = oldest.time
+			self.sess().delete(oldest)
+			self.sess().flush() # the delete must land before the tombstone query re-reads
+			self._bump_offline_tombstone(sender_id, recipient_id, dropped_time, 1)
+		self.sess().add(OfflineMessage(sender_id, recipient_id, now, msg, ex_msg))
+		return ('ok', recipient_id)
+
+	def do_fetch_offline_messages(self, recipient_id):
+		# Sender usernames are resolved in-query (like get_channel_messages) so the reactor
+		# callback needs no DB of its own. Ordered by id: the send order matches the order
+		# the messages were queued in.
+		res = self.sess().query(OfflineMessage.id, OfflineMessage.sender_user_id, User.username, OfflineMessage.time, OfflineMessage.msg, OfflineMessage.ex_msg, OfflineMessage.dropped_count).filter(OfflineMessage.recipient_user_id == recipient_id).join(User, User.id == OfflineMessage.sender_user_id, isouter=True).order_by(OfflineMessage.id).all()
+		return [(id, sender_id, username or "?", when, msg, ex_msg, dropped or 0)
+		        for (id, sender_id, username, when, msg, ex_msg, dropped) in res]
+
+	def do_delete_offline_messages(self, ids):
+		if not ids:
+			return 0
+		return self.sess().query(OfflineMessage).filter(OfflineMessage.id.in_(ids)).delete(synchronize_session=False)
 
 	def add_channel_message(self, channel_id, user_id, bridged_id, msg, ex_msg, date=None):
 		if date is None:
