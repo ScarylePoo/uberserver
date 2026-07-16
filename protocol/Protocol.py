@@ -192,7 +192,7 @@ flag_map = {
 	'u':  'say2',            # SAYFROM, Battle<->Channel unification
 	'sp': 'scriptPassword',  # scriptPassword in JOINEDBATTLE
 	'b':  'battleAuth',      # JOINBATTLEACCEPT/JOINBATTLEDENIED (typically only sent by autohosts)
-	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames
+	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames, JSON SAIDPRIVATE
 }
 # optional flags
 optional_flags = (
@@ -1249,6 +1249,71 @@ class Protocol:
 		if not client.bot and 'mod' in client.accesslevels:
 			self.in_JOIN(client, "moderator")
 
+		self._deliver_offline_messages(client)
+
+	def _deliver_offline_messages(self, client):
+		# reactor thread, at the end of login: client.ignored is populated and LOGININFOEND
+		# has been sent, so the deferred reply lands after the client is fully initialised.
+		# Bots never have queued messages (the enqueue path refuses them), so don't ask.
+		if client.bot:
+			return
+		d = self._root.defer_db(self.userdb.do_fetch_offline_messages, client.user_id)
+		d.addCallback(self._offline_messages_send, client)
+		d.addErrback(self._offline_messages_failed, client)
+
+	def _offline_messages_send(self, msgs, client):
+		# reactor-thread callback: sends, then defers the delete. No reactor-side DB of its
+		# own, so no session bracket.
+		#
+		# Delivery is AT-MOST-ONCE: Send is buffered and unacknowledged, so a disconnect
+		# between the send and the delete landing loses the messages. Closing that would
+		# need a client ack command; deleting only while the client is still connected
+		# narrows the window but does not shut it.
+		if client.session_id not in self._root.clients:
+			return # client disconnected during the DB call; leave the rows for next login
+		if not msgs:
+			return
+		rich = 'jsonchat' in client.compat
+		delivered = []
+		for (id, sender_id, sender_name, when, msg, ex_msg, dropped_count) in msgs:
+			# Re-check the ignore list in memory: enqueue already filtered against it, but the
+			# recipient may have ignored the sender while the message sat in the queue.
+			if sender_id in client.ignored:
+				delivered.append(id) # drop it, but still clear the row
+				continue
+			if msg is None:
+				self._send_offline_tombstone(client, sender_name, when, dropped_count, rich)
+			elif rich:
+				cmd = 'SAIDPRIVATEEX' if ex_msg else 'SAIDPRIVATE'
+				self.out_JSON(client, cmd, {"userName": sender_name, "msg": msg, "ex_msg": bool(ex_msg), "time": self._chat_timestamp(when, True)})
+			else:
+				# Legacy dialect: the message arrives as if it were just sent. There is
+				# nowhere in SAIDPRIVATE to put the original time, which is precisely what
+				# jsonchat exists to fix.
+				cmd = 'SAIDPRIVATEEX' if ex_msg else 'SAIDPRIVATE'
+				client.Send('%s %s %s' % (cmd, sender_name, msg))
+			delivered.append(id)
+		logging.info('[%s] <%s> delivered %d queued offline message(s)' % (client.session_id, client.username, len(delivered)))
+		d = self._root.defer_db(self.userdb.do_delete_offline_messages, delivered)
+		d.addErrback(self._offline_delete_failed, client)
+
+	def _send_offline_tombstone(self, client, sender_name, when, dropped_count, rich):
+		# The content is gone (expired or dropped by the per-sender cap) but the recipient is
+		# still told someone tried to reach them, so they can ask rather than never knowing.
+		if rich:
+			self.out_JSON(client, 'OFFLINEMESSAGESDROPPED', {"userName": sender_name, "count": dropped_count, "time": self._chat_timestamp(when, True)})
+			return
+		self.out_SERVERMSG(client, "%s sent you %d message(s) while you were away, but they expired before you returned. Ask them to resend." % (sender_name, dropped_count))
+
+	def _offline_messages_failed(self, failure, client):
+		# reactor-thread errback: nothing was delivered and nothing was deleted, so the
+		# messages simply wait for the next login. Log it; don't spam the user on every login.
+		logging.error("offline message fetch DB error for <%s>: %s" % (getattr(client, 'username', '?'), failure.getTraceback()))
+
+	def _offline_delete_failed(self, failure, client):
+		# The messages were sent but the delete failed, so they will be delivered again on
+		# the next login. Duplicates are the safe direction here, but say so loudly.
+		logging.error("offline message delete failed for <%s> (they will be redelivered): %s" % (getattr(client, 'username', '?'), failure.getTraceback()))
 
 	def in_CONFIRMAGREEMENT(self, client, verification_code = ""):
 		# Confirm the terms of service as shown with the AGREEMENT commands. (Users must accept the terms of service to use their account.)
@@ -1452,7 +1517,7 @@ class Protocol:
 
 		receiver = self.clientFromUsername(user)
 		if not receiver:
-			logging.info('[%s] <%s>: user to pm is not online: %s' % (client.session_id, client.username, user))
+			self._enqueue_offline_message(client, user, msg, False)
 			return
 		client.Send('SAYPRIVATE %s %s' % (user, msg))
 		if not self.is_ignored(receiver, client):
@@ -1469,10 +1534,53 @@ class Protocol:
 			return
 
 		receiver = self.clientFromUsername(user)
-		if receiver:
-			client.Send('SAYPRIVATEEX %s %s' % (user, msg))
-			if not self.is_ignored(receiver, client):
-				receiver.Send('SAIDPRIVATEEX %s %s' % (client.username, msg))
+		if not receiver:
+			self._enqueue_offline_message(client, user, msg, True)
+			return
+		client.Send('SAYPRIVATEEX %s %s' % (user, msg))
+		if not self.is_ignored(receiver, client):
+			receiver.Send('SAIDPRIVATEEX %s %s' % (client.username, msg))
+
+	# --- offline direct messages ---
+	# The target is not online (clientFromUsername without fromdb only sees live clients),
+	# so queue the message for their next login instead of dropping it. Everything that can
+	# refuse the send needs the db, so it all happens in one worker; the reactor callback
+	# only echoes back to the sender.
+
+	def _enqueue_offline_message(self, client, user, msg, ex_msg):
+		# reactor thread. Hand off to the worker; the echo happens in the callback so we
+		# never echo a message that was refused (unknown user, bot target).
+		cmd = 'SAYPRIVATEEX' if ex_msg else 'SAYPRIVATE'
+		d = self._root.defer_db(self.userdb.do_enqueue_offline_message, client.user_id, user, msg, ex_msg)
+		d.addCallback(self._offline_message_queued, client, user, msg, cmd)
+		d.addErrback(self._offline_message_failed, client, user, cmd)
+
+	def _offline_message_queued(self, result, client, user, msg, cmd):
+		# reactor-thread callback: pure send, no DB -> no commit/rollback/close bracket.
+		if client.session_id not in self._root.clients:
+			return # sender disconnected during the DB call
+		verdict = result[0]
+		if verdict == 'ok':
+			# Echo exactly as the online path does, and say nothing about the queueing: the
+			# sender is not told whether the message was delivered now or stored for later.
+			# An ignored sender also lands here, so ignore status stays unobservable.
+			client.Send('%s %s %s' % (cmd, user, msg))
+			return
+		if verdict == 'bot':
+			# An explicit refusal deserves an explicit reason, and bot status is already
+			# public via ADDUSER, so there is nothing leaked by saying so.
+			self.out_FAILED(client, cmd, "Cannot send offline messages to bots (%s)" % user, False)
+			return
+		# 'nouser': unchanged from the previous behaviour - log it, tell the sender nothing.
+		logging.info('[%s] <%s>: user to pm is not online: %s' % (client.session_id, client.username, user))
+
+	def _offline_message_failed(self, failure, client, user, cmd):
+		# reactor-thread errback: the write did not happen, so mutate nothing. Do NOT echo -
+		# an echo here would tell the sender their message is queued when it was lost.
+		logging.error("%s offline queue DB error for <%s> -> %s: %s" % (cmd, getattr(client, 'username', '?'), user, failure.getTraceback()))
+		if client.session_id not in self._root.clients:
+			return
+		self.out_FAILED(client, cmd, "Server error queueing your message for %s, it was not sent" % user, False)
 
 	def in_BATTLEHOSTMSG(self, client, battle_name, username, msg):
 		# battle host sends a 'servermsg' style message, within a battle to a single user
