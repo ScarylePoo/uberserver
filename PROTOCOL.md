@@ -282,6 +282,56 @@ bots, script_tags, startrects, map/mod/engine, player/spectator limits.
 These are uberserver additions not present in base upstream. **[GAP]** full
 request/response grammar and the notifications each produces.
 
+### 8.2 Offline direct messages
+
+`SAYPRIVATE` / `SAYPRIVATEEX` to a user who is **not online** are queued and delivered
+the next time that user logs in, rather than dropped.
+
+Queueing is unconditional and needs no flag, so this works on every lobby. What the
+`jsonchat` flag buys is the *timestamp*: without it there is nowhere in `SAIDPRIVATE`
+to put the original send time, so an old client receives the queued messages as a burst
+that looks like it just arrived.
+
+**Sending.** The sender gets the usual echo (`SAYPRIVATE <user> <msg>`) and is *not*
+told whether the message was delivered live or stored — the two cases are deliberately
+indistinguishable. Exceptions:
+
+| Case | Result |
+|---|---|
+| Recipient is a **bot** | `FAILED` — bots never receive offline messages, so a queue of commands cannot flood an autohost at login |
+| Recipient does not exist | Silently ignored (unchanged behaviour) |
+| Recipient **ignores** the sender | Echoed as if sent; nothing is stored. Ignore status is not detectable by probing |
+| Server/db error | `FAILED`, and nothing is echoed — a queued message is never implied when the write failed |
+
+**Delivery.** On login, after `LOGININFOEND`:
+
+| Client | Frame |
+|---|---|
+| with `jsonchat` | `JSON {"SAIDPRIVATE":{"userName":"bob","msg":"hi","ex_msg":false,"time":1718200000000000}}` |
+| without | `SAIDPRIVATE bob hi` — no timestamp, delivered as a burst |
+
+`time` is the **original send time** in unix microseconds, not the delivery time.
+`SAYPRIVATEEX` round-trips as `SAIDPRIVATEEX` / `ex_msg: true`.
+
+Delivered messages are deleted immediately. Delivery is **at-most-once**: sends are
+buffered and unacknowledged, so a disconnect mid-delivery can lose them.
+
+**Limits and expiry.** A sender may hold at most **50** queued messages for any one
+recipient, and content is dropped after **14 days** (the same window `channel_history`
+uses — private content is not held longer than public chat).
+
+Neither limit discards anything silently. Whenever content is dropped, a **tombstone**
+survives it: the recipient is still told that someone tried to reach them, so they can
+ask rather than never finding out. One tombstone per sender, counting everything lost:
+
+| Client | Frame |
+|---|---|
+| with `jsonchat` | `JSON {"OFFLINEMESSAGESDROPPED":{"userName":"bob","count":7,"time":1718200000000000}}` |
+| without | `SERVERMSG bob sent you 7 message(s) while you were away, but they expired...` |
+
+`time` is the newest lost message's send time. Tombstones do not expire — they persist
+until delivered, then are deleted like any other queued message.
+
 ---
 
 ## 9. Bridged clients
