@@ -1173,10 +1173,20 @@ class UsersHandler:
 		self.sess().commit()
 		return entry.id
 
-	def get_channel_messages(self, user_id, channel_id, last_msg_id):
-		# returns a list of channel messages since last_msg_id for the specific userid when he is subscribed to the channel
-		# [[date, username, msg, id], ...]
-		res = self.sess().query(ChannelHistory.time, ChannelHistory.msg, ChannelHistory.ex_msg, User.username, BridgedUser.external_username, BridgedUser.location, ChannelHistory.id).filter(ChannelHistory.channel_id == channel_id).filter(ChannelHistory.id > last_msg_id).join(User, isouter=True).join(BridgedUser, isouter=True).order_by(ChannelHistory.id).all()
+	def get_channel_messages(self, user_id, channel_id, last_msg_id, limit):
+		# returns (msgs, truncated) where msgs is [(date, username, msg, ex_msg, id), ...]
+		# after last_msg_id, oldest-first. user_id is unused (kept: existing signature).
+		#
+		# Takes the NEWEST limit rows rather than the oldest: a client resuming from
+		# last_msg_id=0 wants recent context, and handing it the oldest rows of the 14 day
+		# retention window would be useless. A client resuming after a short disconnect is
+		# under the cap either way, so the cap only bites on a cold start. Fetching limit+1
+		# probes for more without a second COUNT: getting more than limit back means older
+		# messages were elided, reported so the caller can say so instead of truncating silently.
+		res = self.sess().query(ChannelHistory.time, ChannelHistory.msg, ChannelHistory.ex_msg, User.username, BridgedUser.external_username, BridgedUser.location, ChannelHistory.id).filter(ChannelHistory.channel_id == channel_id).filter(ChannelHistory.id > last_msg_id).join(User, isouter=True).join(BridgedUser, isouter=True).order_by(ChannelHistory.id.desc()).limit(limit + 1).all()
+		truncated = len(res) > limit
+		res = res[:limit]
+		res.reverse()
 		msgs = []
 		for (htime, msg, ex_msg, username, external_username, location, id) in res:
 			if not username:
@@ -1185,8 +1195,8 @@ class UsersHandler:
 				bridged_username = external_username + ":" + location
 				msgs.append((htime, bridged_username, msg, ex_msg, id))
 			else:
-				msgs.append((htime, username, msg, ex_msg, id))				
-		return msgs
+				msgs.append((htime, username, msg, ex_msg, id))
+		return (msgs, truncated)
 
 class OfflineBridgedClient():
 	def __init__(self, sqluser):
@@ -2014,13 +2024,29 @@ if __name__ == '__main__':
 	assert(last_msg_id > -1)
 
 	for i in range(0,21):
-		msgs = userdb.get_channel_messages(channel.id, client.id, last_msg_id + i -1)
+		# NB: user_id/channel_id were passed the wrong way round here before the limit was
+		# added. It passed only because user_id is unused and a fresh db gives the first
+		# user and the first channel the same id, so the channel_id filter matched anyway.
+		msgs, truncated = userdb.get_channel_messages(client.id, channel.id, last_msg_id + i -1, 200)
 		assert(len(msgs) == 20 - i)
+		assert(truncated == False)
 		if (len(msgs) > 0):
 			assert(msgs[0][0] == now + timedelta(0, i))
 			assert(msgs[0][1] == client.username)
 			assert(msgs[0][2] == msg % i)
 			assert(type(msgs[0][2]) == str)
+
+	# the read cap returns the NEWEST messages, oldest-first, and reports the truncation
+	msgs, truncated = userdb.get_channel_messages(client.id, channel.id, last_msg_id - 1, 5)
+	assert(truncated == True)
+	assert(len(msgs) == 5)
+	assert(msgs[0][2] == msg % 15) # newest 5 of 20, not the oldest 5
+	assert(msgs[4][2] == msg % 19)
+
+	# a cap exactly matching the available rows is not a truncation
+	msgs, truncated = userdb.get_channel_messages(client.id, channel.id, last_msg_id - 1, 20)
+	assert(len(msgs) == 20)
+	assert(truncated == False)
 
 	userdb.add_channel_message(channel.id, None, None, "test", False)
 	userdb.add_channel_message(channel.id, 99, None, "test", False)

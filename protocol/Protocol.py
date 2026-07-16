@@ -192,10 +192,12 @@ flag_map = {
 	'u':  'say2',            # SAYFROM, Battle<->Channel unification
 	'sp': 'scriptPassword',  # scriptPassword in JOINEDBATTLE
 	'b':  'battleAuth',      # JOINBATTLEACCEPT/JOINBATTLEDENIED (typically only sent by autohosts)
+	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames, JSON SAIDPRIVATE
 }
 # optional flags
 optional_flags = (
 	'b', # only useful to autohosts -> permanently optional
+	'jsonchat', # progressive enhancement: without it chat still works, just without timestamps
 )
 
 # flags for functionality that is now either compulsory or was removed
@@ -1651,6 +1653,10 @@ class Protocol:
 	# GETCHANNELMESSAGES catch-up matches what live users saw.
 	_channel_store_max = 10000 # per-channel backlog cap; only reached if the DB stalls badly
 
+	# GETCHANNELMESSAGES read cap: the newest N messages after the client's cursor. Without
+	# this a client passing last_msg_id=0 on a busy channel pulls the whole 14 day window.
+	_channel_history_max_fetch = 200
+
 	def _enqueue_channel_store(self, channel, user_id, bridged_id, msg, ex_msg):
 		# reactor thread only. Append the store and kick the pump if idle.
 		if len(channel.history_queue) >= self._channel_store_max:
@@ -2555,25 +2561,32 @@ class Protocol:
 			self.out_FAILED(client, "GETCHANNELMESSAGES", "Can't get channel messages when not joined", True)
 			return
 		try:
-			datetime.datetime.fromtimestamp(int(last_msg_id))
-		except:
+			last_msg_id = int(last_msg_id)
+			if last_msg_id < 0:
+				raise ValueError
+		except ValueError:
 			self.out_FAILED(client, "GETCHANNELMESSAGES", "Invalid id", True)
 			return
 		# 3.1: read channel history off the reactor thread. The worker returns plain
 		# [(datetime, username, msg, ex_msg, id), ...] - usernames are resolved inside the
 		# query (joins to User/BridgedUser), so the callback does NO reactor-side DB and
 		# needs no session bracket; it just formats + sends. A pure read, so no new races.
-		d = self._root.defer_db(self.userdb.get_channel_messages, client.user_id, channel.id, last_msg_id)
+		d = self._root.defer_db(self.userdb.get_channel_messages, client.user_id, channel.id, last_msg_id, self._channel_history_max_fetch)
 		d.addCallback(self._channelmessages_send, client, chan)
 		d.addErrback(self._channelmessages_failed, client)
 
-	def _channelmessages_send(self, msgs, client, chan):
+	def _channelmessages_send(self, result, client, chan):
 		# reactor-thread callback: pure send, no DB -> no commit/rollback/close bracket.
 		if client.session_id not in self._root.clients:
 			return # client disconnected during the DB call
+		msgs, truncated = result
+		rich = 'jsonchat' in client.compat
+		if truncated and rich:
+			# older messages were elided by the read cap. Only jsonchat clients can be told:
+			# the legacy dialect has no field for it, so they silently get the newest N.
+			self.out_JSON(client, 'CHANNELMESSAGESTRUNCATED', {"chanName": chan, "oldestId": msgs[0][4]})
 		for msg in msgs:
-			timestamp = int(time.mktime(msg[0].timetuple()))
-			self.out_JSON(client,  'SAID', {"chanName": chan, "time": str(timestamp), "userName": msg[1], "msg": msg[2], "ex_msg":msg[3], "id": msg[4]})
+			self.out_JSON(client, 'SAID', {"chanName": chan, "time": self._chat_timestamp(msg[0], rich), "userName": msg[1], "msg": msg[2], "ex_msg": msg[3], "id": msg[4]})
 
 	def _channelmessages_failed(self, failure, client):
 		# reactor-thread errback: a DB error fetching history. Log it loudly; unlike the
@@ -3877,6 +3890,15 @@ class Protocol:
 
 	def out_JSON(self, client, cmd, dict):
 		client.Send('JSON ' + json.dumps({cmd: dict}, separators=(',', ':')))
+
+	def _chat_timestamp(self, dt, rich):
+		# Dual-dialect timestamp for JSON chat frames. jsonchat clients get an integer of
+		# unix microseconds (tachyon's unixTime convention); clients without the flag keep
+		# the original string-of-unix-seconds, because handing an existing JSON SAID parser
+		# a value a million times too large fails silently rather than loudly.
+		if rich:
+			return int(dt.timestamp()) * 1000000 + dt.microsecond
+		return str(int(time.mktime(dt.timetuple())))
 
 def check_protocol_commands():
 	for command in restricted_list:
