@@ -46,12 +46,13 @@ class Sock:
                 self.buf += chunk.decode(errors="replace")
         except socket.timeout:
             pass
-    def collect_said(self, chan, want, timeout=4.0):
-        # GETCHANNELMESSAGES has no end marker; collect `want` SAID lines for `chan`
-        # or give up after `timeout`. Returns list of (id, userName, msg, ex_msg) in
-        # arrival order.
+    def collect_said_raw(self, chan, want, timeout=8.0):
+        # GETCHANNELMESSAGES has no end marker; collect `want` SAID frames for `chan` or
+        # give up after `timeout`. Returns (said_dicts, other_frames) where other_frames
+        # holds any non-SAID JSON frames seen along the way (e.g. the truncation notice).
         deadline = time.time() + timeout
         got = []
+        others = []
         while len(got) < want and time.time() < deadline:
             self.s.settimeout(max(0.05, deadline - time.time()))
             try:
@@ -72,10 +73,18 @@ class Sock:
                 except Exception:
                     continue
                 said = obj.get("SAID")
-                if not said or said.get("chanName") != chan:
+                if said is None:
+                    others.append(obj)
                     continue
-                got.append((int(said["id"]), said["userName"], said["msg"], said["ex_msg"]))
-        return got
+                if said.get("chanName") != chan:
+                    continue
+                got.append(said)
+        return got, others
+
+    def collect_said(self, chan, want, timeout=4.0):
+        # arrival-order (id, userName, msg, ex_msg) tuples
+        said, _ = self.collect_said_raw(chan, want, timeout)
+        return [(int(m["id"]), m["userName"], m["msg"], m["ex_msg"]) for m in said]
     def close(self):
         try: self.s.close()
         except: pass
@@ -97,9 +106,13 @@ def register_and_confirm(user):
     s.close()
     return ok
 
-def login_keep(user):
+def login_keep(user, compat=None):
+    # compat flags ride in the login sentence: "<agent>\t<last_id>\t<flags>"
     s = connect()
-    s.sendall(("LOGIN %s %s 0 * TestClient\n" % (user, PW)).encode())
+    if compat:
+        s.sendall(("LOGIN %s %s 0 * TestClient\t0\t%s\n" % (user, PW, compat)).encode())
+    else:
+        s.sendall(("LOGIN %s %s 0 * TestClient\n" % (user, PW)).encode())
     resp = recv_until(s, "LOGININFOEND", timeout=8)
     if "ACCEPTED" not in resp or "LOGININFOEND" not in resp:
         s.close()
@@ -199,6 +212,108 @@ if sk is not None:
     else:
         print("WARN: invalid last_msg_id did not yield expected FAILED (buf tail: %r)" % sk.buf[-200:])
     sk.close()
+
+# ---------- read cap: newest-N, truncation signal, timestamp dialects ----------
+# Seeded AFTER the checks above so their exact-count assertions are unaffected.
+CAP = 200
+EXTRA = 205  # push the channel past the cap
+conn = pymysql.connect(**DB)
+cur = conn.cursor()
+seed_time = "2030-01-01 00:00:00"  # distinctive + stable: lets us pin the exact timestamp
+rows = [(chan_id, A[0], None, seed_time, "cap%d" % i, 0) for i in range(EXTRA)]
+cur.executemany(
+    "INSERT INTO channel_history (channel_id, user_id, bridged_id, time, msg, ex_msg) VALUES (%s,%s,%s,%s,%s,%s)",
+    rows)
+conn.close()
+print("seeded %d extra rows to exceed the %d cap" % (EXTRA, CAP))
+
+# expected microsecond value for seed_time, computed the same way the server does
+# (naive datetime -> local epoch), so this pins the dialect without hardcoding a TZ.
+import datetime as _dt
+_seed_dt = _dt.datetime(2030, 1, 1, 0, 0, 0)
+EXPECT_US = int(_seed_dt.timestamp()) * 1000000
+EXPECT_SEC = str(int(time.mktime(_seed_dt.timetuple())))
+
+def check_cap(user, compat, label):
+    sk = login_keep(user, compat)
+    if sk is None:
+        errors.append("%s: login failed" % label); return None
+    try:
+        sk.send("JOIN %s" % CHAN)
+        sk.drain(0.6)
+        sk.send("GETCHANNELMESSAGES %s 0" % CHAN)
+        said, others = sk.collect_said_raw(CHAN, CAP)
+        if len(said) != CAP:
+            errors.append("%s: got %d SAID, want exactly %d (cap)" % (label, len(said), CAP))
+            return None
+        # newest-N, not oldest-N: the last seeded row must be present, the first must not
+        msgs = [m["msg"] for m in said]
+        if msgs[-1] != "cap%d" % (EXTRA - 1):
+            errors.append("%s: newest message is %r, want %r" % (label, msgs[-1], "cap%d" % (EXTRA - 1)))
+        if "m0" in msgs:
+            errors.append("%s: oldest message m0 present - returned oldest-N not newest-N" % label)
+        ids = [int(m["id"]) for m in said]
+        if ids != sorted(ids):
+            errors.append("%s: ids not ascending" % label)
+        return said, others
+    finally:
+        sk.close()
+
+def report(label, before):
+    # print PASS only if this section actually added no errors, else print what broke
+    new = errors[before:]
+    if new:
+        print("FAIL: %s" % label)
+        for e in new:
+            print("  ", e)
+    else:
+        print("PASS: %s" % label)
+
+# legacy client: string-of-seconds, and no truncation frame (it has no field for one)
+n = len(errors)
+r = check_cap(viewers[1], None, "legacy")
+if r:
+    said, others = r
+    t = said[-1]["time"]
+    if not (isinstance(t, str) and t == EXPECT_SEC):
+        errors.append("legacy: time=%r (%s), want str %r" % (t, type(t).__name__, EXPECT_SEC))
+    if any("CHANNELMESSAGESTRUNCATED" in o for o in others):
+        errors.append("legacy: got a truncation frame it cannot parse")
+report("legacy dialect -> string seconds, no truncation frame", n)
+
+# jsonchat client: integer microseconds + an explicit truncation notice
+n = len(errors)
+r = check_cap(viewers[2], "jsonchat", "jsonchat")
+if r:
+    said, others = r
+    t = said[-1]["time"]
+    if not (isinstance(t, int) and t == EXPECT_US):
+        errors.append("jsonchat: time=%r (%s), want int %r" % (t, type(t).__name__, EXPECT_US))
+    trunc = [o["CHANNELMESSAGESTRUNCATED"] for o in others if "CHANNELMESSAGESTRUNCATED" in o]
+    if not trunc:
+        errors.append("jsonchat: no truncation frame despite %d rows > %d cap" % (EXTRA, CAP))
+    elif trunc[0].get("oldestId") != int(said[0]["id"]):
+        errors.append("jsonchat: truncation oldestId=%r, want %r" % (trunc[0].get("oldestId"), said[0]["id"]))
+report("jsonchat dialect -> int microseconds + truncation notice", n)
+
+# a cursor near the head must NOT report truncation (the cap only bites on a cold start)
+n = len(errors)
+sk = login_keep(viewers[3], "jsonchat")
+if sk is not None:
+    sk.send("JOIN %s" % CHAN)
+    sk.drain(0.6)
+    conn = pymysql.connect(**DB); cur = conn.cursor()
+    cur.execute("SELECT MAX(id) FROM channel_history WHERE channel_id=%s", (chan_id,))
+    max_id = cur.fetchone()[0]
+    conn.close()
+    sk.send("GETCHANNELMESSAGES %s %d" % (CHAN, max_id - 3))
+    said, others = sk.collect_said_raw(CHAN, 3, timeout=3.0)
+    if len(said) != 3:
+        errors.append("resume: got %d SAID, want 3" % len(said))
+    elif any("CHANNELMESSAGESTRUNCATED" in o for o in others):
+        errors.append("resume: truncation reported for a 3-message catch-up under the cap")
+    sk.close()
+report("short resume returns 3 messages, no truncation", n)
 
 # ---------- disconnect-during-call check ----------
 dropped = 0
