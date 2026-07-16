@@ -1027,8 +1027,37 @@ class UsersHandler:
 		logging.info("deleting %i channel history messages", response.count())
 		response.delete(synchronize_session=False)
 
+		self.expire_offline_messages(now)
+
 		self.sess().commit()
 		self.flush_user_cache()
+
+	def expire_offline_messages(self, now=None):
+		# Drop offline message CONTENT past the TTL, but leave one tombstone per
+		# (sender, recipient) pair behind so a user returning after a long absence still
+		# learns someone tried to reach them. Tombstones themselves never expire here -
+		# they live until delivered, which is the whole point of them.
+		#
+		# Callers: clean(), which commits. Kept commit-free so it stays one unit with it.
+		if now is None:
+			now = datetime.now()
+		cutoff = now - timedelta(days=OFFLINE_MSG_TTL_DAYS)
+		expired = self.sess().query(OfflineMessage).filter(OfflineMessage.time < cutoff).filter(OfflineMessage.msg != None).all()
+		if not expired:
+			return 0
+		logging.info("expiring %i offline messages into tombstones", len(expired))
+		# Collapse per pair first: N expiring messages from one sender must become ONE
+		# tombstone counting N, not N tombstones.
+		per_pair = {}
+		for m in expired:
+			key = (m.sender_user_id, m.recipient_user_id)
+			count, newest = per_pair.get(key, (0, m.time))
+			per_pair[key] = (count + 1, max(newest, m.time))
+			self.sess().delete(m)
+		self.sess().flush() # the deletes must land before _bump_offline_tombstone re-reads
+		for (sender_id, recipient_id), (count, newest) in per_pair.items():
+			self._bump_offline_tombstone(sender_id, recipient_id, newest, count)
+		return len(expired)
 
 	def audit_access(self):
 		now = datetime.now()

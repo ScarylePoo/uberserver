@@ -180,10 +180,62 @@ check(fetched and fetched[0][6] == 7, "tombstone dropped_count should survive th
 run_worker(udb.do_delete_offline_messages, [fetched[0][0]])
 check(run_worker(udb.do_fetch_offline_messages, rid) == [], "a delivered tombstone must be deleted")
 
+# ---------- TTL: content expires into ONE tombstone per pair, tombstones do not ----------
+wipe_msgs()
+TTL = SQLUsers.OFFLINE_MSG_TTL_DAYS
+# microsecond=0: the DATETIME columns store whole seconds, so a value with microseconds
+# would not survive the round trip and the comparisons below would be comparing a python
+# datetime against a truncated one.
+old = (datetime.now() - timedelta(days=TTL + 1)).replace(microsecond=0)
+recent = (datetime.now() - timedelta(days=TTL - 1)).replace(microsecond=0)
+s = sm.sess()
+for i in range(3):
+    s.add(SQLUsers.OfflineMessage(sid, rid, old + timedelta(seconds=i), "old%d" % i, False))
+s.add(SQLUsers.OfflineMessage(sid, rid, recent, "still fresh", False))
+s.add(SQLUsers.OfflineMessage(oid, rid, old, "other sender old", False))  # a second pair
+s.commit()
+sm.close_guard()
+
+n = run_worker(udb.expire_offline_messages)
+check(n == 4, "expire should have expired 4 messages (3 + 1 from another sender), got %r" % (n,))
+
+r = rows(sid, rid)
+content = [x for x in r if x[1] is not None]
+tombs = [x for x in r if x[1] is None]
+check(len(content) == 1 and content[0][1] == "still fresh",
+      "content inside the TTL must survive, got %r" % (content,))
+check(len(tombs) == 1, "3 expiring messages from one sender must collapse to ONE tombstone, got %d" % len(tombs))
+check(tombs and tombs[0][3] == 3, "tombstone should count 3 expired, got %r" % (tombs and tombs[0][3],))
+check(tombs and tombs[0][4] == old + timedelta(seconds=2),
+      "tombstone time should be the NEWEST expired message, got %r want %r" % (tombs and tombs[0][4], old + timedelta(seconds=2)))
+
+# a separate sender gets its own tombstone
+otombs = [x for x in rows(oid, rid) if x[1] is None]
+check(len(otombs) == 1, "a different sender must get its own tombstone, got %d" % len(otombs))
+check(otombs and otombs[0][3] == 1, "other sender tombstone count should be 1, got %r" % (otombs and otombs[0][3],))
+
+# tombstones are NOT expired by a second pass, however old they are
+n2 = run_worker(udb.expire_offline_messages)
+check(n2 == 0, "a second expire pass should find nothing, got %r" % (n2,))
+check(len([x for x in rows(sid, rid) if x[1] is None]) == 1,
+      "an old tombstone must survive expiry - it lives until delivered")
+
+# an expiry after a cap-drop accumulates into the same tombstone rather than a second one
+wipe_msgs()
+s = sm.sess()
+s.add(SQLUsers.OfflineMessage(sid, rid, old, None, False, 2))  # pre-existing tombstone
+s.add(SQLUsers.OfflineMessage(sid, rid, old, "expiring", False))
+s.commit()
+sm.close_guard()
+run_worker(udb.expire_offline_messages)
+r = rows(sid, rid)
+check(len(r) == 1 and r[0][1] is None, "expiry must reuse the existing tombstone, got %r" % (r,))
+check(r and r[0][3] == 3, "tombstone should accumulate to 3 (2 dropped + 1 expired), got %r" % (r and r[0][3],))
+
 wipe_msgs()
 if errors:
     print("FAIL (%d):" % len(errors))
     for e in errors:
         print("  -", e)
     sys.exit(1)
-print("PASS: offline message workers (enqueue/cap/tombstone/ignore/bot/fetch/delete)")
+print("PASS: offline message workers (enqueue/cap/tombstone/ignore/bot/fetch/delete/expiry)")
