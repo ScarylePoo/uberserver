@@ -142,6 +142,11 @@ Clients advertise optional protocol capabilities via compatibility flags. Suppor
 | `u` | `say2` | `SAYFROM`; battle/channel unification of say commands |
 | `sp` | `scriptPassword` | scriptPassword included in `JOINEDBATTLE` |
 | `b` | `battleAuth` | `JOINBATTLEACCEPT` / `JOINBATTLEDENIED` (autohosts) — permanently optional |
+| `jsonchat` | `jsonChat` | Microsecond timestamps in JSON chat frames; `JSON SAIDPRIVATE` for queued offline messages — permanently optional |
+
+`jsonchat` is a progressive enhancement, not a gate: everything it covers still works
+without it, just with less information. See [Channel history](#61-channel-history-getchannelmessages)
+and [Offline direct messages](#82-offline-direct-messages).
 
 Deprecated/removed flags still recognised for negotiation: `cl`, `t`, `l`, `a`, `m`,
 `p`, `et` — these represent behaviour that is now mandatory or was removed. **[GAP]**
@@ -189,6 +194,61 @@ mute lists, topic, forwards. On join the server sends the joining client the mem
 **[GAP]** Full request/response listing for each channel command, including:
 `JOINED`/`LEFT` notifications, `CHANNELTOPIC` framing (and the now-mandatory timestamp),
 `SAID`/`SAIDEX` formats, channel-key (`SETCHANNELKEY`) semantics, ChanServ interactions.
+
+### 6.1 Channel history (`GETCHANNELMESSAGES`)
+
+```
+GETCHANNELMESSAGES <chanName> <lastMsgId>
+```
+
+Replays stored messages for a channel the client has already joined. History is **pull
+only** — the server sends no backlog on `JOIN`, so a client wanting it must ask.
+
+Storage is **opt-in per channel** (`store_history`, off by default) and only registered
+channels have it: an unregistered channel has id 0 and the command returns nothing.
+
+**`lastMsgId` is a cursor, not a timestamp.** Pass `0` for a cold start, or the highest
+`id` previously seen to resume. Messages are stored one insert at a time per channel, so
+the autoincrement `id` is monotonic with the order live users saw — which makes it a
+reliable resume token across a disconnect. Non-integer or negative values get
+`FAILED ... Invalid id`.
+
+The reply is a sequence of `JSON SAID` frames, oldest first, one per message:
+
+```
+JSON {"SAID":{"chanName":"foo","time":"1718200000","userName":"bob","msg":"hi","ex_msg":false,"id":42}}
+```
+
+| Field | Meaning |
+|---|---|
+| `chanName` | Channel the message was sent to |
+| `time` | Send time. **Dialect depends on `jsonchat`** — see below |
+| `userName` | Sender. Bridged users appear as `<externalName>:<location>`; a deleted account renders as `?` |
+| `msg` | Message body |
+| `ex_msg` | `true` if sent via `SAYEX` (an action rather than speech) |
+| `id` | Cursor value — the highest one seen is what to pass as `lastMsgId` next time |
+
+**Timestamp dialect:**
+
+| Client | `time` |
+|---|---|
+| with `jsonchat` | integer, unix **microseconds** (e.g. `1718200000123456`) |
+| without `jsonchat` | string, unix **seconds** (e.g. `"1718200000"`) |
+
+**Limits.** At most **200** messages are returned per call — the *newest* 200 after the
+cursor, not the oldest, so a cold-starting client gets recent context rather than the far
+end of the retention window. When older messages were elided, a `jsonchat` client is told
+so first:
+
+```
+JSON {"CHANNELMESSAGESTRUNCATED":{"chanName":"foo","oldestId":42}}
+```
+
+`oldestId` is the id of the oldest message in the batch that follows; anything between
+the client's cursor and that id was skipped. Clients without `jsonchat` cannot be told —
+the legacy dialect has no field for it — and simply receive the newest 200.
+
+Stored messages are deleted after **14 days**.
 
 ---
 
