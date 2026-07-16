@@ -142,11 +142,11 @@ Clients advertise optional protocol capabilities via compatibility flags. Suppor
 | `u` | `say2` | `SAYFROM`; battle/channel unification of say commands |
 | `sp` | `scriptPassword` | scriptPassword included in `JOINEDBATTLE` |
 | `b` | `battleAuth` | `JOINBATTLEACCEPT` / `JOINBATTLEDENIED` (autohosts) — permanently optional |
-| `jsonchat` | `jsonChat` | Microsecond timestamps in JSON chat frames — permanently optional |
+| `jsonchat` | `jsonChat` | Microsecond timestamps in JSON chat frames; `JSON SAIDPRIVATE` for queued offline messages — permanently optional |
 
 `jsonchat` is a progressive enhancement, not a gate: everything it covers still works
-without it, just with less information. See
-[Channel history](#61-channel-history-getchannelmessages).
+without it, just with less information. See [Channel history](#61-channel-history-getchannelmessages)
+and [Offline direct messages](#82-offline-direct-messages).
 
 Deprecated/removed flags still recognised for negotiation: `cl`, `t`, `l`, `a`, `m`,
 `p`, `et` — these represent behaviour that is now mandatory or was removed. **[GAP]**

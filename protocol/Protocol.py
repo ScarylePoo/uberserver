@@ -192,7 +192,7 @@ flag_map = {
 	'u':  'say2',            # SAYFROM, Battle<->Channel unification
 	'sp': 'scriptPassword',  # scriptPassword in JOINEDBATTLE
 	'b':  'battleAuth',      # JOINBATTLEACCEPT/JOINBATTLEDENIED (typically only sent by autohosts)
-	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames
+	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames, JSON SAIDPRIVATE
 }
 # optional flags
 optional_flags = (
