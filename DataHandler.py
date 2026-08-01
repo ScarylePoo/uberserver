@@ -98,6 +98,12 @@ class DataHandler:
 		self.redirect = None
 
 		self.start_time = time.time()
+		# Optional operator-supplied IP overrides. Set via env vars here (detectIp() runs
+		# from __init__, before parseArgv()) or via --onlineip / --localip, which re-run
+		# detection once the command line has been parsed.
+		self.online_ip_override = os.environ.get('ONLINE_IP') or None
+		self.local_ip_override = os.environ.get('LOCAL_IP') or None
+		self._ip_refresh_pending = False
 		self.detectIp()
 		self.cert = None
 		
@@ -443,6 +449,19 @@ class DataHandler:
 					self.argeementfile = argp[0]
 				except:
 					print('Error reading agreement file')
+			elif arg in ['onlineip', 'localip']:
+				try:
+					value = argp[0]
+					if not self._looks_like_ipv4(value):
+						raise ValueError('not a dotted-quad IPv4 address: %r' % value)
+					if arg == 'onlineip':
+						self.online_ip_override = value
+					else:
+						self.local_ip_override = value
+					# detectIp() already ran from __init__; re-run so the override takes hold.
+					self.detectIp()
+				except (IndexError, ValueError) as e:
+					print('Invalid --%s specification, ignoring: %s' % (arg, e))
 			elif arg == 'proxies':
 				try:
 					self.trusted_proxyfile = argp[0]
@@ -827,38 +846,84 @@ class DataHandler:
 		'https://ipecho.net/plain',
 	]
 
+	@staticmethod
+	def _looks_like_ipv4(value):
+		parts = value.split('.')
+		return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
 	def detectIp(self):
-		logging.info('Detecting local IP:')
-		local_addr = self.get_ip_address()
-		logging.info(local_addr)
+		if self.local_ip_override:
+			local_addr = self.local_ip_override
+			logging.info('Local IP overridden: %s' % local_addr)
+		else:
+			logging.info('Detecting local IP:')
+			local_addr = self.get_ip_address()
+			logging.info(local_addr)
+
+		if self.online_ip_override:
+			# Skip detection entirely. Avoids a startup dependency on external HTTP
+			# services and pins the advertised host IP for LAN-hosted battles.
+			logging.info('Online IP overridden: %s' % self.online_ip_override)
+			self.local_ip = local_addr
+			self.online_ip = self.online_ip_override
+			return
 
 		logging.info('Detecting online IP:')
 		web_addr = None
-		for service in self.IP_DETECTION_SERVICES:
-			try:
-				timeout = socket.getdefaulttimeout()
-				socket.setdefaulttimeout(5)
-				response = urlopen(service).read().decode("utf-8").strip()
-				socket.setdefaulttimeout(timeout)
-				# Validate it looks like an IP address
-				parts = response.split('.')
-				if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-					web_addr = response
-					logging.info('Online IP detected via %s: %s' % (service, web_addr))
-					break
-				else:
+		saved_timeout = socket.getdefaulttimeout()
+		try:
+			for service in self.IP_DETECTION_SERVICES:
+				try:
+					socket.setdefaulttimeout(5)
+					response = urlopen(service).read().decode("utf-8").strip()
+					if self._looks_like_ipv4(response):
+						web_addr = response
+						logging.info('Online IP detected via %s: %s' % (service, web_addr))
+						break
 					logging.warning('IP detection service %s returned unexpected response: %s' % (service, response[:50]))
-			except Exception as e:
-				logging.warning('IP detection service %s failed: %s' % (service, str(e)))
-			finally:
-				socket.setdefaulttimeout(socket.getdefaulttimeout())
+				except Exception as e:
+					logging.warning('IP detection service %s failed: %s' % (service, str(e)))
+		finally:
+			# Restore once, unconditionally. The previous per-iteration restore was a
+			# no-op on the failure path and left the process-wide default pinned at 5s.
+			socket.setdefaulttimeout(saved_timeout)
 
 		if not web_addr:
-			logging.warning('All IP detection services failed, falling back to local IP: %s' % local_addr)
+			logging.error(
+				'All IP detection services failed. Falling back to local IP %s, which will be '
+				'advertised to external clients as the battle host address and is very likely '
+				'unroutable. Set ONLINE_IP or --onlineip to pin this value.' % local_addr)
 			web_addr = local_addr
 
 		self.local_ip = local_addr
 		self.online_ip = web_addr
+
+	def refreshIp(self):
+		'''Re-run IP detection. Safe to call at runtime; blocks on network I/O, so call
+		via defer_db/deferToThread rather than directly on the reactor thread.'''
+		old_online, old_local = self.online_ip, self.local_ip
+		self.detectIp()
+		if (old_online, old_local) != (self.online_ip, self.local_ip):
+			logging.info('IP refresh changed values: online %s -> %s, local %s -> %s'
+				% (old_online, self.online_ip, old_local, self.local_ip))
+		return self.online_ip
+
+	def refreshIpAsync(self):
+		'''Run refreshIp() on a worker thread so the blocking HTTP calls never touch the
+		reactor. Returns a Deferred firing with the new online IP (callbacks run on the
+		reactor thread, so they may safely mutate shared state), or None if a refresh is
+		already in flight.'''
+		if self._ip_refresh_pending:
+			return None
+		self._ip_refresh_pending = True
+
+		def _release(result):
+			self._ip_refresh_pending = False
+			return result
+
+		d = deferToThread(self.refreshIp)
+		d.addBoth(_release)
+		return d
 
 	def createSocket(self):
 		backlog = 100

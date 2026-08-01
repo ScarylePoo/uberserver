@@ -158,6 +158,39 @@ class ChanServClient(Client):
 				self._root.usernames[target.username].bot = False
 			return '<%s> bot flag has been removed' % target.username
 
+		if cmd == 'refreship':
+			if not client.isAdmin():
+				return 'You must be an admin to refresh the server IP'
+			old_online = self._root.online_ip
+			d = self._root.refreshIpAsync()
+			if d is None:
+				return 'An IP refresh is already in progress, please wait.'
+
+			def _report(new_online):
+				if new_online == old_online:
+					msg = 'IP refresh complete. Unchanged: online %s, local %s' % (
+						new_online, self._root.local_ip)
+				else:
+					msg = 'IP refresh complete. Online IP %s -> %s (local %s). New battles will advertise the updated address; battles already open must be rehosted.' % (
+						old_online, new_online, self._root.local_ip)
+				self.Respond('SAYPRIVATE %s %s' % (user, msg))
+
+			def _failed(failure):
+				logging.error('IP refresh failed: %s' % failure)
+				self.Respond('SAYPRIVATE %s IP refresh failed: %s' % (user, failure.getErrorMessage()))
+
+			d.addCallbacks(_report, _failed)
+			if self._root.online_ip_override:
+				return 'Refreshing server IP. Note ONLINE_IP/--onlineip is pinned to %s, so the online IP will not change.' % self._root.online_ip_override
+			return 'Refreshing server IP (current: %s). This may take a few seconds...' % old_online
+
+		if cmd == 'showip':
+			if not client.isMod():
+				return 'You must be a moderator or admin to view server IP configuration'
+			return 'Server online IP: %s (override: %s)\nServer local IP: %s (override: %s)' % (
+				self._root.online_ip, self._root.online_ip_override or 'none',
+				self._root.local_ip, self._root.local_ip_override or 'none')
+
 		if not chan:
 			return "Channel not specified"
 		if chan[0] == '#':

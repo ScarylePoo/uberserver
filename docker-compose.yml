@@ -39,6 +39,10 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       LOBBY_PORT:  8200
       NAT_PORT:    8201
+      # Optional. Pins the public IP advertised to external clients as the battle host
+      # address. Leave unset to auto-detect on startup; set it if your WAN IP is static,
+      # or if auto-detection has ever picked up a stale/incorrect value.
+      ONLINE_IP:   ${ONLINE_IP:-}
       EXTRA_ARGS:  ${EXTRA_ARGS:-}
     volumes:
       # Persist logs outside the container
