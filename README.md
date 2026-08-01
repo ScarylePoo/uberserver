@@ -56,6 +56,7 @@ Fill in your values:
 | `LOBBY_PORT` | Port clients connect to. Default: `8200` |
 | `NAT_PORT` | Port for NAT hole-punching. Default: `8201` |
 | `MAXMIND_LICENSE_KEY` | Optional. Free key from [maxmind.com](https://www.maxmind.com/en/geolite2/signup) for country flags. Leave blank to skip. |
+| `ONLINE_IP` | Optional. The server's own public IP. Leave blank to auto-detect. Affects battles hosted on the same LAN as the server, and identifies the server's own traffic. See [Host IP Detection](#host-ip-detection). |
 | `EXTRA_ARGS` | Optional extra arguments passed to server.py. |
 
 > **Never commit your `.env` file to source control — it contains passwords.**
@@ -235,6 +236,19 @@ Once logged in as an admin, you manage the server through the **ChanServ** bot. 
 Duration format: `1h` = one hour, `2d` = two days.
 
 > `:setbot` and `:unsetbot` must be sent as a PM to ChanServ — they cannot be used inside a channel since they require a username argument.
+
+### Server Management
+
+| Command | Who can use it |
+|---|---|
+| `:showip` | Moderators, admins |
+| `:refreship` | Admins |
+
+`:showip` reports the server's current online and local IP, and whether either is pinned by an override.
+
+`:refreship` re-runs IP detection without restarting the container. Use it if the server's WAN IP changes while it is running — see [Host IP Detection](#host-ip-detection). It replies immediately and PMs the result once detection finishes. Battles already open keep their old advertised address and must be rehosted; new battles pick up the refreshed value.
+
+> Both must be sent as a PM to ChanServ, or typed in a channel without a channel argument.
 
 ### Access Levels
 
@@ -531,6 +545,76 @@ docker compose restart uberserver
 
 ---
 
+## Host IP Detection
+
+When a player opens a battle, the server decides which IP address to advertise to everyone else as the game host address. That address ends up in the game's start script as `HostIP`. The logic lives in `client_AddBattle` in `protocol/Protocol.py` and picks one of three values per receiving client:
+
+| Situation | Address sent |
+|---|---|
+| Joining client has the same WAN IP as the host | The host's own LAN IP (both are behind the same router) |
+| Host is on a private IP, joining client is on WAN | The **server's** public IP (`online_ip`) |
+| Otherwise | The host's WAN IP as seen by the server |
+
+The second case is what makes LAN-hosted battles reachable from the internet — it assumes the relevant port is forwarded to the host. If your SPADS node and your own machine sit on the same LAN as the lobby server, **every** battle you host takes this path and is advertised using `online_ip`.
+
+Note the scope: `online_ip` is consulted **only** in that second case. A host connecting from elsewhere on the internet has a public address, falls through to the third case, and has its own WAN IP passed through untouched. Those hosts are unaffected by `online_ip` entirely.
+
+### Other uses of `online_ip`
+
+Besides battle addressing, the server uses `online_ip` to recognise its own traffic. Loopback connections (`127.*`) are rewritten to it in `Client.py`, and connections whose address matches it are exempted from two protections:
+
+- the per-IP registration rate limit (`Protocol.py`, `in_REGISTER`)
+- the IPHub VPN/proxy check, which is skipped outright
+
+This matters if you pin `ONLINE_IP` manually. A *stale* value mainly breaks LAN-hosted battles; a *wrong* value additionally grants unlimited registrations and a VPN-check bypass to whoever actually occupies that address. Verify the value with `curl -s https://api.ipify.org` before pinning it.
+
+### How `online_ip` is determined
+
+At startup the server queries a series of public IP-echo services (ipify, ifconfig.me, checkip.amazonaws.com, icanhazip, ipecho) and takes the first valid answer. It falls back to the local IP if all of them fail.
+
+**This runs once, at process start, and is never repeated on its own.** If the server's WAN IP changes while the container is running — an ISP lease renewal, a router or firewall reconfiguration — the server keeps advertising the old address indefinitely, and external players get an unroutable `HostIP` for every battle. Nothing in the logs will flag this after the fact.
+
+Three ways to fix or avoid it:
+
+- **Restart** — `docker compose restart uberserver` re-runs detection.
+- **`:refreship`** — re-runs detection live, no restart, no dropped clients.
+- **`ONLINE_IP`** — pins the value permanently. Appropriate only for a static WAN IP, or where outbound HTTPS from the container is blocked. A pin never self-corrects, so on a dynamic address it is worse than leaving detection on.
+
+### Diagnosing a wrong host IP
+
+Check what the server currently believes, via `:showip` or the startup log:
+
+```bash
+docker compose logs uberserver | grep -iE "detecting|overridden|IP detected|falling back"
+```
+
+Compare against reality:
+
+```bash
+curl -s https://api.ipify.org
+```
+
+What you see tells you which value broke:
+
+| Symptom | Cause |
+|---|---|
+| An address you used to have | Stale `online_ip` — WAN IP changed since startup |
+| A `172.x` address | All detection services failed and it fell back to the container's bridge address. Logged at error level |
+| A `192.168.x` reaching external players | The private-IP branch didn't trigger; check what the host reported at login |
+| **Every** host shows the same wrong IP | A server-side value (`online_ip`), not a per-host misconfiguration |
+
+That last row is the useful discriminator: if only one host is affected it's that host's config, and the `logins` table records what each client reported:
+
+```sql
+SELECT u.username, l.ip_address, l.local_ip, l.agent, l.time
+FROM logins l JOIN users u ON u.id = l.user_id
+ORDER BY l.time DESC LIMIT 20;
+```
+
+Note that `local_ip` is supplied by the client in its `LOGIN` command and is only sanity-checked, not verified.
+
+---
+
 ## Troubleshooting
 
 **Container keeps restarting**
@@ -542,6 +626,11 @@ docker compose exec uberserver cat /app/server.log
 - Check containers are running: `docker compose ps`
 - Check firewall: `sudo ufw status`
 - Test locally: `telnet localhost 8200`
+
+**Players can't connect to hosted battles / wrong host IP in the start script**
+- Check the advertised address: PM ChanServ `:showip`
+- If it's stale, PM ChanServ `:refreship` (admin) or `docker compose restart uberserver`
+- Full explanation: [Host IP Detection](#host-ip-detection)
 
 **Need to wipe and start fresh** (deletes all data)
 ```bash
