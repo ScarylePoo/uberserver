@@ -193,11 +193,13 @@ flag_map = {
 	'sp': 'scriptPassword',  # scriptPassword in JOINEDBATTLE
 	'b':  'battleAuth',      # JOINBATTLEACCEPT/JOINBATTLEDENIED (typically only sent by autohosts)
 	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames, JSON SAIDPRIVATE
+	'r':  'relay',           # understands relay-hosted battles, can ask for TURN credentials
 }
 # optional flags
 optional_flags = (
 	'b', # only useful to autohosts -> permanently optional
 	'jsonchat', # progressive enhancement: without it chat still works, just without timestamps
+	'r', # only useful to clients that can relay -> permanently optional
 )
 
 # flags for functionality that is now either compulsory or was removed
