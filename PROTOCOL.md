@@ -280,7 +280,7 @@ bots, script_tags, startrects, map/mod/engine, player/spectator limits.
 - Host force-commands: `FORCEALLYNO`, `FORCETEAMNO`, `FORCETEAMCOLOR`,
   `FORCESPECTATORMODE`, `HANDICAP`, `KICKFROMBATTLE`, `RING`.
 
-### 7.1 Relay hosting (`TURNCREDENTIALS`)
+### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`)
 
 A player who cannot forward a port can host through a TURN relay instead. The relay
 allocation is an ordinary public address, so the battle is advertised in `BATTLEOPENED` and
@@ -323,6 +323,42 @@ Failure cases, all reported as `TURNCREDENTIALSFAILED <reason>`:
   matching the `REGISTER` and `RENAMEACCOUNT` limits
 - the server could not build a credential whose fields are free of spaces, which means its
   TURN URI is misconfigured
+
+#### Joiner addresses (`CLIENTIP`)
+
+A TURN relay only forwards traffic from an address the host has already installed a
+permission for. Traffic from any other address is dropped, and neither end is told
+(RFC 5766 section 9.3). So a relay host has to know each joiner's address before that
+joiner's engine sends its first packet, and the joiner cannot supply it: the packets that
+would carry it are the ones being dropped. The lobby is the only party that knows it in time.
+
+```
+S> CLIENTIP <username> <ip>
+```
+
+Sent to the host of a battle, once per join, immediately before the `JOINEDBATTLE` that
+announces the same user. Players, spectators and mid-game joiners are all the same case, and
+a host that gates joins behind `JOINBATTLEREQUEST` (the `b` flag) gets it after it accepts,
+not before. Nothing is sent for the host's own join.
+
+`<ip>` is the address the outside world sees the joiner at, which is what a TURN permission
+has to match. Where the joiner reached the lobby through a trusted proxy that is the address
+it gave at login, not the proxy's, the same choice `JOINBATTLEREQUEST` makes.
+
+There is no port. TURN permissions match on IP alone and ignore the port (RFC 5766
+section 9), so a port here would be a number with nothing to do.
+
+Two conditions, both required, decide whether the host gets this at all:
+- the host advertised `r` at login, so it knows what the message is for
+- the server has a relay configured, the same `server_turn.txt` that gates `TURNCREDENTIALS`
+
+A host meeting neither sees a byte-for-byte unchanged battle. `CLIENTIP` is a strict
+addition, and no existing client receives it.
+
+`CLIENTIPPORT` is a different message and is unchanged. It carries a UDP port for NAT
+punching, is sent only for battles with a `natType` above zero, and needs the joiner to have
+a UDP source port already registered. A relay joiner has none of that, and widening
+`CLIENTIPPORT` to cover it would change what an existing autohost is told.
 
 ---
 
