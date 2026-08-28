@@ -8,6 +8,8 @@ import socket
 import logging
 import datetime
 import base64
+import hashlib
+import hmac
 import json
 import traceback
 
@@ -112,6 +114,9 @@ restricted = {
 	'MYSTATUS',
 	'PORTTEST',
 	'JSON',
+	########
+	# relay hosting
+	'TURNCREDENTIALS',
 	########
 	# bridge bots
 	'BRIDGECLIENTFROM',
@@ -3257,13 +3262,60 @@ class Protocol:
 		client.Remove(reason)
 
 	def in_LISTCOMPFLAGS(self, client):
+		# 'r' is how a client learns whether this server offers relay hosting, so it is only
+		# advertised once a TURN server is configured. It stays in flag_map either way: a
+		# client that sends 'r' to a server with no relay must not be told its flag is
+		# unknown, it must simply get a clean TURNCREDENTIALSFAILED if it asks.
 		flags = ""
 		for flag in flag_map:
+			if flag == 'r' and not self._root.turn_enabled():
+				continue
 			if len(flags)>0:
 				flags += " " + flag
 			else:
 				flags = flag
 		client.Send("COMPFLAGS %s" %(flags))
+
+	def in_TURNCREDENTIALS(self, client):
+		'''
+		Request a time-limited TURN credential for relay hosting.
+
+		Replies TURNCREDENTIALS <uri> <username> <password> <ttl_seconds> on success, or
+		TURNCREDENTIALSFAILED <reason> otherwise. The scheme is
+		draft-uberti-behave-turn-rest-00, which coturn implements as use-auth-secret:
+		the username is "<unix expiry>:<lobby account id>" and the password is
+		base64(hmac_sha1(shared secret, username)). coturn recomputes both from the same
+		secret, so it never has to talk to the lobby or hold any session state.
+		'''
+		if not self._root.turn_enabled():
+			client.Send('TURNCREDENTIALSFAILED This server has no relay configured')
+			return
+
+		ttl = self._root.turn_ttl
+		username = '%d:%s' % (int(time.time()) + ttl, client.user_id)
+		password = base64.b64encode(hmac.new(self._root.turn_secret.encode('utf-8'), username.encode('utf-8'), hashlib.sha1).digest()).decode('utf-8')
+		uri = self._root.turn_uri
+
+		# The reply is exactly four space-separated fields and the client refuses the whole
+		# line if any of them is empty or shifted. Whitespace anywhere but the separators
+		# would do that silently, so check rather than trust: the URI comes from operator
+		# config and the account id has been a string on its way here.
+		for field in (uri, username, password):
+			if not field or any(c.isspace() for c in field):
+				logging.error('[%s] <%s>: refusing to send a malformed TURN credential' % (client.session_id, client.username))
+				client.Send('TURNCREDENTIALSFAILED Server could not build a valid credential, please tell an admin')
+				return
+
+		# Rate limit per account, matching in_REGISTER's per-IP limit and in_RENAMEACCOUNT's
+		# per-user one: 3 in flight, decaying by one every 20 minutes (server.py). Stays after
+		# the checks above so a request that got no credential does not burn a slot.
+		recent = self._root.recent_turn_credentials.get(client.user_id, 0)
+		if recent >= 3:
+			client.Send('TURNCREDENTIALSFAILED too many recent credential requests, please try again later')
+			return
+		self._root.recent_turn_credentials[client.user_id] = recent + 1
+
+		client.Send('TURNCREDENTIALS %s %s %s %d' % (uri, username, password, ttl))
 
 	def in_KICK(self, client, username, reason=''):
 		# kick target username from server
