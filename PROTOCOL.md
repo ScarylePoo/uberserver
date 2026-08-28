@@ -143,6 +143,7 @@ Clients advertise optional protocol capabilities via compatibility flags. Suppor
 | `sp` | `scriptPassword` | scriptPassword included in `JOINEDBATTLE` |
 | `b` | `battleAuth` | `JOINBATTLEACCEPT` / `JOINBATTLEDENIED` (autohosts) — permanently optional |
 | `jsonchat` | `jsonChat` | Microsecond timestamps in JSON chat frames; `JSON SAIDPRIVATE` for queued offline messages — permanently optional |
+| `r` | `relay` | Client understands relay-hosted battles and can ask for TURN credentials (permanently optional) |
 
 `jsonchat` is a progressive enhancement, not a gate: everything it covers still works
 without it, just with less information. See [Channel history](#61-channel-history-getchannelmessages)
