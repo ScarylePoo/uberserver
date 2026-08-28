@@ -13,6 +13,7 @@ class Battle(Channel):
 		self.type = ''
 		self.natType = ''
 		self.port = 0
+		self.relayed_ip = None # set from RELAYEDHOST when the host is relayed, None otherwise
 
 		self.title = ''
 		self.map = ''
