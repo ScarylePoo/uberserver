@@ -319,8 +319,10 @@ allocations.
 
 Failure cases, all reported as `TURNCREDENTIALSFAILED <reason>`:
 - the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
-- the caller has asked too often, limited to 3 credentials decaying by one every 20 minutes,
-  matching the `REGISTER` and `RENAMEACCOUNT` limits
+- the caller has asked too often. The allowance is 3 credentials, decaying by one every 20
+  minutes, and it is held against the lobby account rather than the connection, so
+  reconnecting does not clear it. `REGISTER` uses the same allowance and the same decay,
+  counted per IP
 - the server could not build a credential whose fields are free of spaces, which means its
   TURN URI is misconfigured
 
@@ -381,15 +383,16 @@ working an address out from the host's connection. It is then forgotten, so a se
 `OPENBATTLE` is an ordinary battle again. `LEAVEBATTLE` forgets it too, and so does
 disconnecting, so an address can never attach itself to a battle it was not sent for.
 
-`natType` is untouched and stays `0`. A TURN allocation is an ordinary public UDP address, so a
-joining client dials a relayed battle exactly as it dials a direct one. There is nothing here
-for SpringLobby or Chobby to implement, and inventing a NAT mode would have cost every one of
-them a change.
+The server neither reads nor changes `natType`, and a relay host sends `0` like a direct host.
+A TURN allocation is an ordinary public UDP address, so a joining client dials a relayed battle
+exactly as it dials a direct one. There is nothing here for SpringLobby or Chobby to implement,
+and inventing a NAT mode would have cost every one of them a change.
 
 The `<port>` is in this line as well as in `OPENBATTLE`. `OPENBATTLE` is the one the battle is
 advertised at. This one is here because a rebuilt allocation moves the address and the port
 together, and saying so without reopening the battle needs both in one line. Updating a battle
-that is already open is not implemented.
+that is already open is not implemented, so today the server range-checks this port and then
+discards it. Send the real one anyway, because an out-of-range value is refused.
 
 All three of the address translations `BATTLEOPENED` normally does are skipped, including the
 one that hands a joiner the host's LAN address when the two share a WAN address. Two players
@@ -401,6 +404,7 @@ whoever is trying to host:
 - the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
 - the client did not send `r` at login. Unlike `TURNCREDENTIALS`, which hands out something
   only the caller can use, this decides what everybody else is told to connect to
+- the address does not parse as an IP address at all
 - the address is not a public one: loopback, any private or link-local range, carrier-grade
   NAT, multicast, the documentation ranges, or the lobby server's own address. Both families
   are covered by the same check
