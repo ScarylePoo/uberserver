@@ -1,0 +1,146 @@
+# ── coturn config for uberserver relay hosting ────────────────────────────────
+#
+# Copy this to turnserver.conf and edit it before you run anything:
+#
+#     cp turnserver.conf.example turnserver.conf
+#
+# turnserver.conf is gitignored, because the finished file holds your shared
+# secret. This example file must never hold a real one.
+#
+# Every value tagged EXAMPLE below is a deployment choice with no correct
+# answer. The arithmetic for working out your own is in the README, under
+# "Relay Hosting (TURN)". Do not ship these numbers unread.
+#
+# Defaults quoted in the comments are coturn 4.17.2's own, taken from
+# `turnserver -h` and the turnserver.conf.default shipped with it. Check them
+# against your version.
+
+# ── Listening ─────────────────────────────────────────────────────────────────
+
+# Plain STUN/TURN over UDP and TCP. coturn's default is 3478, and the turn: URI
+# on line 1 of the lobby's server_turn.txt has to name the same port.
+listening-port=3478
+
+# EXAMPLE. Left unset, coturn listens on every address it finds. Set it if the
+# machine has several addresses and you want the relay on one of them.
+#listening-ip=203.0.113.10
+
+# Set this if the relay is behind NAT, which includes most cloud VPS instances
+# with a mapped public address. Left unset, coturn signals the address it is
+# bound to, and if that is the private one the allocation is unreachable. The
+# NAT has to forward each relay port to the same port number.
+#external-ip=203.0.113.10
+#external-ip=203.0.113.10/10.0.0.5
+
+# EXAMPLE. coturn needs a realm for long-term credentials. The value is not part
+# of the credential the lobby mints, so anything works; the relay's own hostname
+# is the usual choice. Without one coturn falls back to the host domain name.
+realm=relay.example.org
+
+# ── Credentials ───────────────────────────────────────────────────────────────
+
+# The lobby mints credentials with draft-uberti-behave-turn-rest-00 and coturn
+# recomputes the same HMAC from the secret below, so the two processes never
+# talk to each other and neither keeps session state.
+use-auth-secret
+
+# MUST be byte for byte the same string as line 2 of the lobby's
+# server_turn.txt. Nothing anywhere detects a mismatch. coturn answers 401 to
+# every credential and every relayed battle fails to start.
+#
+# Generate one:  openssl rand -hex 32
+static-auth-secret=REPLACE_ME_BEFORE_USE
+
+# ── Allocation port range ─────────────────────────────────────────────────────
+
+# One UDP port per allocation, one allocation per relayed battle, so the size of
+# this range is your ceiling on concurrent relayed battles.
+#
+# coturn's defaults are min-port=49152 and max-port=65535, per RFC 5766, which
+# is 16384 ports. Every port in the range has to be open in the firewall, so a
+# range you have sized deliberately is easier to operate than the default one.
+#
+# EXAMPLE, 250 ports for 250 concurrent relayed battles:
+min-port=49152
+max-port=49401
+
+# ── Quotas ────────────────────────────────────────────────────────────────────
+#
+# All four of these default to 0, meaning unlimited. Unlimited is what makes an
+# open relay: anyone holding an account on your lobby can use it as free transit
+# for whatever they like, and nothing in the game caps them. Set all four.
+
+# Concurrent allocations per lobby account. One relayed battle needs one.
+# Leave headroom above that: a host whose allocation is refused after a coturn
+# restart builds a new one, and the old one may not have expired yet.
+#
+# EXAMPLE:
+user-quota=2
+
+# Concurrent allocations across the whole server. Keep this at or below the size
+# of the port range above, so you run out of quota rather than out of ports.
+#
+# EXAMPLE, matching the 250 port range above:
+total-quota=250
+
+# Bytes per second per allocation, counted separately for each direction. This
+# is the setting that stops one session saturating the link. Size it from the
+# engine's own ceiling, worked out in the README: 1048576 B/s covers a 16 player
+# battle. Set it below what a battle actually needs and you silently drop game
+# traffic, which looks like lag rather than like a misconfiguration.
+#
+# EXAMPLE, 16 players:
+max-bps=1048576
+
+# Bytes per second across the whole server, counted separately for each
+# direction. Size it from what the machine's link and your egress bill can
+# stand, not from a number copied out of here.
+#
+# EXAMPLE, 20 concurrent 16 player battles:
+bps-capacity=20971520
+
+# ── Peers ─────────────────────────────────────────────────────────────────────
+
+# A relay forwards to any address it can reach unless told otherwise. On a
+# machine shared with the lobby that includes the lobby itself, the database,
+# and everything else on the private network. Deny the private ranges.
+#
+# coturn already denies loopback peers by default. It does not deny anything
+# else. Add your own ranges if the relay sits on a network with more on it.
+no-multicast-peers
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# TCP relay endpoints (RFC 6062) are on by default. A battle is UDP, so nothing
+# here needs them, and leaving them on is transit you are not using.
+no-tcp-relay
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+#
+# TURN over TLS and DTLS, worth having for players whose network blocks plain
+# UDP to unusual ports. coturn's default port is 5349. Uncomment all three lines
+# together: set tls-listening-port without a usable certificate and coturn logs
+# an error and does not listen on it.
+#
+# Point cert and pkey at a certificate from a CA the players' clients already
+# trust, whose name matches the host in the URI on line 1 of server_turn.txt.
+# The lobby's own self-signed server.pem is not a substitute: a client that
+# checks the chain will refuse it.
+#
+# coturn reads these once at startup. SIGHUP only reopens the log file, so a
+# renewal needs a restart.
+#
+#tls-listening-port=5349
+#cert=/etc/coturn/turn_cert.pem
+#pkey=/etc/coturn/turn_pkey.pem
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+# stdout, so `docker compose logs coturn` shows it. Running coturn outside a
+# container, put a path here instead and set simple-log if logrotate handles it.
+log-file=stdout
