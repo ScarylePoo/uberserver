@@ -18,7 +18,8 @@ TAG = sys.argv[1] if len(sys.argv) > 1 else "r1"
 def enc(raw): return base64.b64encode(hashlib.md5(raw.encode()).digest()).decode()
 PW = enc("secretpw")
 DB = DB_KWARGS
-LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.log")
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+LOG = os.path.join(ROOT, "server.log")
 
 def recv_until(s, substr, timeout=8):
     s.settimeout(timeout); buf = b""
