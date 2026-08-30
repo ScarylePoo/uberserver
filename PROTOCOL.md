@@ -154,7 +154,7 @@ when the server has a TURN relay configured, because a client reads `COMPFLAGS` 
 whether to offer relay hosting at all. It stays in `flag_map` on every server, so a client
 that sends `r` to a server with no relay is never told the flag is unknown: it just gets
 `TURNCREDENTIALSFAILED` if it asks for a credential. See
-[Relay hosting](#71-relay-hosting-turncredentials-clientip-relayedhost).
+[Relay hosting](#71-relay-hosting-turncredentials-clientip-relayedhost-moverelayedhost).
 
 Deprecated/removed flags still recognised for negotiation: `cl`, `t`, `l`, `a`, `m`,
 `p`, `et` — these represent behaviour that is now mandatory or was removed. **[GAP]**
