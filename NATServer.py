@@ -1,4 +1,5 @@
 from socketserver import UDPServer,DatagramRequestHandler
+from twisted.internet import reactor
 import sys, logging
 
 class CustomUDPServer(UDPServer):
@@ -26,11 +27,19 @@ class handler(DatagramRequestHandler):
 
 	def handle(self):
 		addr = self.client_address
-		msg = self.rfile.readline().rstrip()
+		# the datagram arrives as bytes and usernames is keyed by str, so without decoding it
+		# the test below can never be true and nothing downstream of it has ever run.
+		msg = self.rfile.readline().decode("utf-8", errors="replace").rstrip()
 		#print "%s from %s(%d)" % (msg, addr[0], addr[1])
 		self.wfile.write(b'PONG')
+		# a cheap filter on this thread so stray datagrams do not queue reactor work. It can be
+		# stale, so _udp_packet resolves the user again on the reactor and is the real check.
 		if msg in self._root.usernames:
-			self._root.usernames[msg]._protocol._udp_packet(msg, addr[0], addr[1])
+			# this runs on the UDP server's own thread (server.py starts it there), and
+			# _udp_packet mutates client state and writes to a client's transport, neither of
+			# which is safe off the reactor. Client has no _protocol attribute either, so the
+			# protocol comes from the root.
+			reactor.callFromThread(self._root.protocol._udp_packet, msg, addr[0], addr[1])
 
 class NATServer:
 	def __init__(self, port):
