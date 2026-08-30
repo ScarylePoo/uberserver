@@ -386,6 +386,20 @@ working an address out from the host's connection. It is then forgotten, so a se
 `OPENBATTLE` is an ordinary battle again. `LEAVEBATTLE` forgets it too, and so does
 disconnecting, so an address can never attach itself to a battle it was not sent for.
 
+`RELAYEDHOSTFAILED` is written before any answer to the `OPENBATTLE` that follows it on the
+same connection. `in_RELAYEDHOST` replies where the line is read, and the handler for the next
+line runs only after it returns, so a refusal always comes ahead of both `BATTLEOPENED` and the
+`OPENBATTLE` acknowledgement. A client can rely on that to hold a refusal until it knows
+whether the battle opened, which is the only point at which the refusal means anything to the
+person hosting. `tests/integration/relayedhostorderingtest.py` pins it.
+
+Expect both in one read. The two lines answer two lines the client sent back to back, so they
+routinely arrive in a single TCP segment: in that test the refusal and the whole battle-open
+sequence came back in one 405 byte read. A client that keeps the refusal in a slot holding only
+the latest value will have the `OPENBATTLE` acknowledgement overwrite it before anything reads
+it, and will then tell the host their unrelayed battle is relayed, which is the opposite of
+what happened. Record a refusal somewhere the acknowledgement cannot displace.
+
 The server neither reads nor changes `natType`, and a relay host sends `0` like a direct host.
 A TURN allocation is an ordinary public UDP address, so a joining client dials a relayed battle
 exactly as it dials a direct one. There is nothing here for SpringLobby or Chobby to implement,
