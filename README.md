@@ -479,7 +479,9 @@ The TURN server can run anywhere, on this machine or another host. It needs `use
 
 This file is only the lobby's half. Running the relay itself, what it costs to run, and how to check it works are in [Relay Hosting (TURN)](#relay-hosting-turn).
 
-Line 3 is the number of seconds a credential stays valid. coturn re-checks the expiry every time the relay refreshes an allocation, so a credential that runs out mid-game cuts that game off. The default of 43200 (12 hours) is sized to outlast a long game, because the relay agent keeps running after the lobby connection has gone and nothing can ask for a replacement.
+Line 3 is the number of seconds a credential stays valid. coturn judges the credential once, when it creates the session, and checks later requests against the key it kept, so an expiry passing under a live allocation costs nothing. What cuts a game off is expiry before the relay has to be rebuilt, because a rebuild opens a new session, the credential is judged again, and a dead one is refused. The default of 43200 (12 hours) is sized to outlast a long game, because the relay agent keeps running after the lobby connection has gone and nothing can ask for a replacement.
+
+Do not set line 3 below 5115 seconds. Coilbox refuses to open a relayed battle on a credential shorter than that and says so before anybody joins, and the server logs a warning at startup if you configure one. The figure is 5083 seconds, the 99th percentile of 18418 real games from api.bar-rts.com covering 22 to 29 August 2026, plus the relay agent's 32 second worst-case rebuild backoff. Median over those games was 1302s and p90 3051s, so the floor sits well clear of ordinary play. The derivation is tomjn/coilbox#2091, and the coturn behaviour it rests on was measured against 4.17.2 in tomjn/coilbox#2041. Other clients may accept less, which is why a lifetime under the floor is a warning rather than a refusal.
 
 Treat the secret like a password: anyone who has it can mint credentials for your relay. The server never logs it and never sends it to a client.
 
