@@ -65,8 +65,11 @@ class Battle(Channel):
 			client.Send('DISABLEUNITS %s' % ' '.join(self.disabled_units))
 
 		if self.natType > 0:
-			if client.udpport:
-				self._root.usernames[host].Send('CLIENTIPPORT %s %s %s' % (client.username, client.ip_address, client.udpport))
+			# host is the client object resolved above, not a username, so it was being used as
+			# a key into a username-keyed dict. A host joining its own battle is skipped too,
+			# because punching a hole to itself means nothing.
+			if client.udpport and client != host:
+				host.Send('CLIENTIPPORT %s %s %s' % (client.username, client.ip_address, client.udpport))
 
 		specs = 0
 		for sessionid in self.users:
