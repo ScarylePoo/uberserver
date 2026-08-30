@@ -27,6 +27,17 @@ separator = '-'*60
 # server_turn.txt.
 TURN_DEFAULT_TTL = 12 * 60 * 60
 
+# Relay hosting: the shortest credential lifetime a client is known to accept, in seconds.
+# Coilbox refuses to open a relayed battle on anything shorter and says so before anybody
+# joins. The figure is 5083s, the 99th percentile of 18418 real games from api.bar-rts.com
+# covering 22 to 29 August 2026, plus the relay agent's 32 second worst-case rebuild backoff.
+# The derivation is tomjn/coilbox#2091. It has to cover a whole game rather than just the
+# moment of hosting because coturn works the key out once when it creates the session and
+# checks later requests against the key it kept. What ends a game is expiry before the relay
+# has to be rebuilt, because a rebuild opens a new session, the credential is judged again,
+# and a dead one answers 401 (measured against coturn 4.17.2 in tomjn/coilbox#2041).
+TURN_CLIENT_MIN_TTL = 5115
+
 try:
 	from urllib2 import urlopen
 except:
@@ -55,6 +66,10 @@ def parse_turn_config(lines):
 			raise ValueError('the credential lifetime on line 3 must be a whole number of seconds, found %r' % lines[2])
 		if ttl <= 0:
 			raise ValueError('the credential lifetime on line 3 must be greater than zero, found %d' % ttl)
+	# A warning rather than an error: the server's job is to mint what the operator asked
+	# for, and a client other than coilbox may well accept less.
+	if ttl < TURN_CLIENT_MIN_TTL:
+		logging.warning('server_turn.txt line 3 sets a credential lifetime of %ds, below the %ds coilbox requires. Coilbox will refuse to open a relayed battle on a credential this short, so relay hosting will not work for its players. Another client may accept less. See the server_turn.txt section of the README.' % (ttl, TURN_CLIENT_MIN_TTL))
 	return uri, secret, ttl
 
 class DataHandler:
