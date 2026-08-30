@@ -477,7 +477,7 @@ a_long_random_string
 
 The TURN server can run anywhere, on this machine or another host. It needs `use-auth-secret` turned on and a `static-auth-secret` set to the same string as line 2. coturn then recomputes each credential itself, so it never talks to the lobby and keeps no session state. Use `turns:` on port 5349 if your relay serves TLS.
 
-This file is only the lobby's half. Running the relay itself, what it costs to run, and how to check it works are in [Relay Hosting (TURN)](#relay-hosting-turn).
+This file is only the lobby's half. Running the relay itself, what it costs to run, and how to check it works are in [Relay Hosting (TURN)](#relay-hosting-turn). If you are turning relay hosting on for the first time, follow [docs/ops/relay-hosting-setup.md](docs/ops/relay-hosting-setup.md), which puts the whole job in order.
 
 Line 3 is the number of seconds a credential stays valid. coturn judges the credential once, when it creates the session, and checks later requests against the key it kept, so an expiry passing under a live allocation costs nothing. What cuts a game off is expiry before the relay has to be rebuilt, because a rebuild opens a new session, the credential is judged again, and a dead one is refused. The default of 43200 (12 hours) is sized to outlast a long game, because the relay agent keeps running after the lobby connection has gone and nothing can ask for a replacement.
 
@@ -654,6 +654,8 @@ Note that `local_ip` is supplied by the client in its `LOGIN` command and is onl
 A player who cannot forward a port cannot host a battle. Relay hosting gives them a way round it: they open an allocation on a TURN relay, the battle is advertised at the relay's address, and everyone else joins it exactly as they would join any other host. It is optional. Without it those players can still play, they just cannot host.
 
 There are two halves. The lobby half is [`server_turn.txt`](#server_turntxt---relay-hosting-turn) above, three lines of config. The relay half is a coturn server, and that is what this section is about. You have to run it, and every byte it carries is on your bill.
+
+This section is reference material, organised by topic. Doing it for the first time, work through [docs/ops/relay-hosting-setup.md](docs/ops/relay-hosting-setup.md) instead, which is the same job in the order it has to happen and links back here for the reasoning at each decision.
 
 ### The lobby does not care where the relay runs
 
