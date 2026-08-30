@@ -52,6 +52,9 @@ services:
       # Optional: mount custom motd / agreement files
       # - ./server_motd.txt:/app/server_motd.txt:ro
       # - ./server_agreement.txt:/app/server_agreement.txt:ro
+      # Relay hosting. The lobby reads this from its working directory, so it has
+      # to be mounted to reach the container. See docs/ops/relay-hosting-setup.md
+      # - ./server_turn.txt:/app/server_turn.txt:ro
     networks:
       - internal
     sysctls:
