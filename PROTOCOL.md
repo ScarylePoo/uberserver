@@ -149,6 +149,13 @@ Clients advertise optional protocol capabilities via compatibility flags. Suppor
 without it, just with less information. See [Channel history](#61-channel-history-getchannelmessages)
 and [Offline direct messages](#82-offline-direct-messages).
 
+`r` is the one flag the server advertises conditionally. `LISTCOMPFLAGS` includes it only
+when the server has a TURN relay configured, because a client reads `COMPFLAGS` to decide
+whether to offer relay hosting at all. It stays in `flag_map` on every server, so a client
+that sends `r` to a server with no relay is never told the flag is unknown: it just gets
+`TURNCREDENTIALSFAILED` if it asks for a credential. See
+[Relay hosting](#71-relay-hosting-turncredentials).
+
 Deprecated/removed flags still recognised for negotiation: `cl`, `t`, `l`, `a`, `m`,
 `p`, `et` — these represent behaviour that is now mandatory or was removed. **[GAP]**
 document `LISTCOMPFLAGS` output and exactly how/when a client declares its flags during
@@ -171,7 +178,7 @@ connection holds the listed level (higher levels inherit lower ones in practice 
 | **user — channel** | `CHANNELS`, `CHANNELTOPIC`, `JOIN`, `LEAVE`, `SAY`, `SAYEX`, `SAYPRIVATE`, `SAYPRIVATEEX`, `GETCHANNELMESSAGES` |
 | **user — account** | `GETUSERINFO`, `RENAMEACCOUNT`, `CHANGEPASSWORD`, `CHANGEEMAILREQUEST`, `CHANGEEMAIL`, `RESENDVERIFICATION` |
 | **user — social** | `IGNORE`, `UNIGNORE`, `IGNORELIST`, `FRIENDREQUEST`, `ACCEPTFRIENDREQUEST`, `DECLINEFRIENDREQUEST`, `UNFRIEND`, `FRIENDLIST`, `FRIENDREQUESTLIST` |
-| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON` |
+| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON`, `TURNCREDENTIALS` |
 | **user — bridge** | `BRIDGECLIENTFROM`, `UNBRIDGECLIENTFROM`, `JOINFROM`, `LEAVEFROM`, `SAYFROM` |
 | **user — deprecated** | `MUTE`, `MUTELIST`, `SETCHANNELKEY`, `UNMUTE`, `SAYBATTLE`, `SAYBATTLEEX`, `SAYBATTLEPRIVATEEX`, `FORCELEAVECHANNEL`, `GETINGAMETIME` |
 | **mod** | `GETUSERID`, `GETIP`, `FINDIP`, `SETBOTMODE`, `CREATEBOTACCOUNT`, `RESETUSERPASSWORD`, `KICK`, `BAN`, `BANSPECIFIC`, `UNBAN`, `BLACKLIST`, `UNBLACKLIST`, `LISTBANS`, `LISTBLACKLIST` |
@@ -272,6 +279,50 @@ bots, script_tags, startrects, map/mod/engine, player/spectator limits.
   `DISABLEUNITS` / `ENABLEUNITS` / `ENABLEALLUNITS`.
 - Host force-commands: `FORCEALLYNO`, `FORCETEAMNO`, `FORCETEAMCOLOR`,
   `FORCESPECTATORMODE`, `HANDICAP`, `KICKFROMBATTLE`, `RING`.
+
+### 7.1 Relay hosting (`TURNCREDENTIALS`)
+
+A player who cannot forward a port can host through a TURN relay instead. The relay
+allocation is an ordinary public address, so the battle is advertised in `BATTLEOPENED` and
+joined like any other direct host. The lobby's only job is to vouch for its own users, which
+it does by minting a credential the relay will accept.
+
+```
+C> TURNCREDENTIALS
+S> TURNCREDENTIALS <uri> <username> <password> <ttl_seconds>
+S> TURNCREDENTIALSFAILED <reason>
+```
+
+Requires login. The success reply is exactly four space-separated fields and none of `uri`,
+`username` or `password` may be empty or contain a space, because a space in any of them
+shifts every field after it. `ttl_seconds` is a plain base-10 integer and comes last, so a
+client can use it to detect a shifted line. The failure reason is the rest of the line and
+may contain spaces. It is free text meant to be shown to a person.
+
+The credential is `draft-uberti-behave-turn-rest-00`, which coturn implements as
+`use-auth-secret`:
+
+```
+username = "<unix expiry timestamp>:<lobby account id>"
+password = base64(hmac_sha1(shared secret, username))
+```
+
+The relay recomputes the HMAC from a `static-auth-secret` it shares with the lobby, so the
+two processes never talk and neither holds session state. The secret is server configuration
+(`server_turn.txt`, see the README) and is never sent to a client.
+
+`ttl_seconds` is how long the credential stays valid, 43200 (12 hours) by default and set by
+the operator. It is sized against a whole game rather than battle setup: coturn re-checks the
+expiry on every refresh of a live allocation, and the relay outlives the lobby connection, so
+a credential that expires part way through ends the game rather than merely blocking new
+allocations.
+
+Failure cases, all reported as `TURNCREDENTIALSFAILED <reason>`:
+- the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
+- the caller has asked too often, limited to 3 credentials decaying by one every 20 minutes,
+  matching the `REGISTER` and `RENAMEACCOUNT` limits
+- the server could not build a credential whose fields are free of spaces, which means its
+  TURN URI is misconfigured
 
 ---
 

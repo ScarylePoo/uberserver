@@ -455,6 +455,34 @@ Get a free API key at https://iphub.info — the free tier allows 1,000 checks p
 
 ---
 
+### server_turn.txt - Relay Hosting (TURN)
+
+Lets a player who cannot forward a port host a battle through a TURN relay. When this file is present the server advertises the `r` compatibility flag and answers the `TURNCREDENTIALS` command with a credential the relay will accept.
+
+```
+line 1: TURN URI              (required)
+line 2: shared secret         (required)
+line 3: credential lifetime   (optional, seconds, default 43200)
+```
+
+**Example:**
+
+```
+turn:relay.example.org:3478
+a_long_random_string
+43200
+```
+
+The TURN server can run anywhere, on this machine or another host. It needs `use-auth-secret` turned on and a `static-auth-secret` set to the same string as line 2. coturn then recomputes each credential itself, so it never talks to the lobby and keeps no session state. Use `turns:` on port 5349 if your relay serves TLS.
+
+Line 3 is the number of seconds a credential stays valid. coturn re-checks the expiry every time the relay refreshes an allocation, so a credential that runs out mid-game cuts that game off. The default of 43200 (12 hours) is sized to outlast a long game, because the relay agent keeps running after the lobby connection has gone and nothing can ask for a replacement.
+
+Treat the secret like a password: anyone who has it can mint credentials for your relay. The server never logs it and never sends it to a client.
+
+> If this file is not present, relay hosting is disabled, `r` is left out of `COMPFLAGS`, and `TURNCREDENTIALS` replies `TURNCREDENTIALSFAILED`.
+
+---
+
 ### bad_words.txt — Profanity Filter
 
 A list of words to censor in chat. One word per line. The server replaces matched words with `***` in channels where censoring is enabled.
