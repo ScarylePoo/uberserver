@@ -154,7 +154,7 @@ when the server has a TURN relay configured, because a client reads `COMPFLAGS` 
 whether to offer relay hosting at all. It stays in `flag_map` on every server, so a client
 that sends `r` to a server with no relay is never told the flag is unknown: it just gets
 `TURNCREDENTIALSFAILED` if it asks for a credential. See
-[Relay hosting](#71-relay-hosting-turncredentials).
+[Relay hosting](#71-relay-hosting-turncredentials-clientip-relayedhost).
 
 Deprecated/removed flags still recognised for negotiation: `cl`, `t`, `l`, `a`, `m`,
 `p`, `et` — these represent behaviour that is now mandatory or was removed. **[GAP]**
@@ -178,7 +178,7 @@ connection holds the listed level (higher levels inherit lower ones in practice 
 | **user — channel** | `CHANNELS`, `CHANNELTOPIC`, `JOIN`, `LEAVE`, `SAY`, `SAYEX`, `SAYPRIVATE`, `SAYPRIVATEEX`, `GETCHANNELMESSAGES` |
 | **user — account** | `GETUSERINFO`, `RENAMEACCOUNT`, `CHANGEPASSWORD`, `CHANGEEMAILREQUEST`, `CHANGEEMAIL`, `RESENDVERIFICATION` |
 | **user — social** | `IGNORE`, `UNIGNORE`, `IGNORELIST`, `FRIENDREQUEST`, `ACCEPTFRIENDREQUEST`, `DECLINEFRIENDREQUEST`, `UNFRIEND`, `FRIENDLIST`, `FRIENDREQUESTLIST` |
-| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON`, `TURNCREDENTIALS` |
+| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON`, `TURNCREDENTIALS`, `RELAYEDHOST` |
 | **user — bridge** | `BRIDGECLIENTFROM`, `UNBRIDGECLIENTFROM`, `JOINFROM`, `LEAVEFROM`, `SAYFROM` |
 | **user — deprecated** | `MUTE`, `MUTELIST`, `SETCHANNELKEY`, `UNMUTE`, `SAYBATTLE`, `SAYBATTLEEX`, `SAYBATTLEPRIVATEEX`, `FORCELEAVECHANNEL`, `GETINGAMETIME` |
 | **mod** | `GETUSERID`, `GETIP`, `FINDIP`, `SETBOTMODE`, `CREATEBOTACCOUNT`, `RESETUSERPASSWORD`, `KICK`, `BAN`, `BANSPECIFIC`, `UNBAN`, `BLACKLIST`, `UNBLACKLIST`, `LISTBANS`, `LISTBLACKLIST` |
@@ -280,7 +280,7 @@ bots, script_tags, startrects, map/mod/engine, player/spectator limits.
 - Host force-commands: `FORCEALLYNO`, `FORCETEAMNO`, `FORCETEAMCOLOR`,
   `FORCESPECTATORMODE`, `HANDICAP`, `KICKFROMBATTLE`, `RING`.
 
-### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`)
+### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`, `RELAYEDHOST`)
 
 A player who cannot forward a port can host through a TURN relay instead. The relay
 allocation is an ordinary public address, so the battle is advertised in `BATTLEOPENED` and
@@ -359,6 +359,59 @@ addition, and no existing client receives it.
 punching, is sent only for battles with a `natType` above zero, and needs the joiner to have
 a UDP source port already registered. A relay joiner has none of that, and widening
 `CLIENTIPPORT` to cover it would change what an existing autohost is told.
+
+#### The battle's address (`RELAYEDHOST`)
+
+A relayed battle lives at a TURN allocation on the relay, which is a public address on a
+machine the host does not own. The server cannot work that out for itself. Everything it knows
+about a host is the connection the host is talking to it on, and for a relayed host that
+connection names the machine nobody can reach, which is the reason the allocation exists. So
+the host has to say.
+
+```
+C> RELAYEDHOST <ip> <port>
+C> OPENBATTLE <type> <natType> <key> <port> ...
+S> RELAYEDHOSTFAILED <reason>
+```
+
+Requires login and the `r` flag. Two plain fields, no tab sentence, and `<ip>` may be IPv4 or
+IPv6. There is no reply on success. The address is held against the connection and consumed by
+that client's next `OPENBATTLE`, which advertises the battle at it in `BATTLEOPENED` instead of
+working an address out from the host's connection. It is then forgotten, so a second
+`OPENBATTLE` is an ordinary battle again. `LEAVEBATTLE` forgets it too, and so does
+disconnecting, so an address can never attach itself to a battle it was not sent for.
+
+`natType` is untouched and stays `0`. A TURN allocation is an ordinary public UDP address, so a
+joining client dials a relayed battle exactly as it dials a direct one. There is nothing here
+for SpringLobby or Chobby to implement, and inventing a NAT mode would have cost every one of
+them a change.
+
+The `<port>` is in this line as well as in `OPENBATTLE`. `OPENBATTLE` is the one the battle is
+advertised at. This one is here because a rebuilt allocation moves the address and the port
+together, and saying so without reopening the battle needs both in one line. Updating a battle
+that is already open is not implemented.
+
+All three of the address translations `BATTLEOPENED` normally does are skipped, including the
+one that hands a joiner the host's LAN address when the two share a WAN address. Two players
+behind one NAT reach a relayed battle through the relay rather than across their own LAN, so
+every recipient is told the same relay address.
+
+Failure cases, all reported as `RELAYEDHOSTFAILED <reason>`, free text meant to be shown to
+whoever is trying to host:
+- the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
+- the client did not send `r` at login. Unlike `TURNCREDENTIALS`, which hands out something
+  only the caller can use, this decides what everybody else is told to connect to
+- the address is not a public one: loopback, any private or link-local range, carrier-grade
+  NAT, multicast, the documentation ranges, or the lobby server's own address. Both families
+  are covered by the same check
+- the port is not a whole number between 1 and 65535
+
+The server does not check that the address belongs to the relay it minted a credential for.
+`server_turn.txt` holds a URI whose host is usually a name, coturn's `relay-ip` is allowed to
+differ from the address it signals on, and resolving a name inside the command handler would
+stall the reactor.
+
+A client that sends no `RELAYEDHOST` sees a byte-for-byte unchanged battle.
 
 ---
 

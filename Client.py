@@ -83,6 +83,7 @@ class Client():
 		self.battle_bots = {}
 		self.current_battle = None # battle_id
 		self.pending_battle = None # battle_id
+		self.relayed_host_ip = None # address from RELAYEDHOST, waiting for the next OPENBATTLE
 		self.went_ingame = 0
 		self.spectator = False
 		self.battlestatus = {'ready':'0', 'id':'0000', 'ally':'0000', 'mode':'0', 'sync':'00', 'side':'00', 'handicap':'0000000'}
