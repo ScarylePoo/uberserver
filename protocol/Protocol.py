@@ -374,7 +374,11 @@ class Protocol:
 		required_args = total_args - optional_args
 
 		if (numspaces < required_args):
+			# both lines: the sentence for a person, the tags for a client that wants to stop
+			# waiting on the command it sent without matching English (#51). Logging stays on
+			# the SERVERMSG so the server log gains nothing.
 			self.out_SERVERMSG(client, '%s failed. Incorrect arguments.' % command)
+			self.out_FAILED(client, command, 'Incorrect arguments.')
 			return False, []
 		if (required_args == 0 and numspaces == 0):
 			return True, []
@@ -411,6 +415,9 @@ class Protocol:
 			if args and len(args)>64:
 				args = args[:64] + "..."				
 			self.out_SERVERMSG(client, "%s failed. Unknown command. (args='%s')" % (command, args), True)
+			# the args stay out of the tags: the client sent them, and they are unvalidated bytes
+			# that would land inside a tab-separated frame.
+			self.out_FAILED(client, command, 'Unknown command.')
 			return False
 
 		for level in client.accesslevels:
@@ -420,6 +427,7 @@ class Protocol:
 
 		if (not allowed):
 			self.out_SERVERMSG(client, '%s failed. Insufficient rights.' % command, True)
+			self.out_FAILED(client, command, 'Insufficient rights.')
 			return False
 
 		function = getattr(self, 'in_' + command)

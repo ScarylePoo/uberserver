@@ -689,13 +689,41 @@ the README.
 
 ## 14. Error & response conventions
 
-Today, failures are reported in two main ways (**[GAP]** verify completeness):
+Today, failures are reported in three main ways (**[GAP]** verify completeness):
 - `DENIED <reason>` for command-specific rejections (e.g. login).
 - `SERVERMSG <free text>` for general failures ("`<CMD> failed. <reason>`").
+- `FAILED msg=<free text>\tcmd=<COMMAND>` for the same, in a form a client can branch on.
 
 There is **no stable machine-readable error-code scheme** — reasons are human free-text.
 A future protocol-compatible improvement is to keep the free text but prefix a stable
 token clients can branch on. Tracked under [Known gaps](#known-gaps--open-questions).
+
+### A command the server would not run
+
+A command the server refuses before running it is answered with both a `SERVERMSG` and a
+`FAILED`, carrying the same reason. There are three such refusals:
+
+```
+S> SERVERMSG <COMMAND> failed. Incorrect arguments.
+S> FAILED msg=Incorrect arguments.	cmd=<COMMAND>
+
+S> SERVERMSG <COMMAND> failed. Unknown command. (args='<args>')
+S> FAILED msg=Unknown command.	cmd=<COMMAND>
+
+S> SERVERMSG <COMMAND> failed. Insufficient rights.
+S> FAILED msg=Insufficient rights.	cmd=<COMMAND>
+```
+
+The `cmd` tag is the command as the client sent it, upper-cased. A client waiting on a reply
+can use it to tell "you sent me something I do not implement" from an announcement, without
+matching English. The `SERVERMSG` wording is not pinned, and does vary between deployed
+servers, which is why the `FAILED` line is there.
+
+The unknown-command `SERVERMSG` echoes the arguments, truncated at 64 characters. The `FAILED`
+line does not, because those are unvalidated bytes from the client and the frame is
+tab-separated.
+
+Both lines are sent for every refusal, so a client that reads only `SERVERMSG` sees no change.
 
 ---
 
