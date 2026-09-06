@@ -600,7 +600,15 @@ class Protocol:
 
 	def _validateIP(self, ipAddress):
 		return self.ipRegex_compiled.match(ipAddress)
-	
+
+	def publicIP(self, client):
+		# The address the rest of the internet sees this client at, which is not always the
+		# address it is connected from: behind a trusted proxy the socket carries the proxy's
+		# address and the client's own arrives in the LOGIN local_ip field (_login_finish_now).
+		if client.ip_address in self._root.trusted_proxies:
+			return client.local_ip
+		return client.ip_address
+
 	def _validLegacyPasswordSyntax(self, password):
 		# checks if an old-style password is correctly encoded
 		if (not password):
@@ -2356,8 +2364,7 @@ class Protocol:
 				client.Send('JOINBATTLEFAILED Waiting for JOINBATTLEACCEPT/JOINBATTLEDENIED from host')
 			else:
 				self.addPendingBattle(client, battle)
-			client_ip = client.local_ip if client.ip_address in self._root.trusted_proxies else client.ip_address
-			host.Send('JOINBATTLEREQUEST %s %s' % (username, client_ip))
+			host.Send('JOINBATTLEREQUEST %s %s' % (username, self.publicIP(client)))
 			return
 		self.removePendingBattle(client)
 		battle.joinBattle(client)
