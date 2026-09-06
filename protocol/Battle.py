@@ -13,6 +13,7 @@ class Battle(Channel):
 		self.type = ''
 		self.natType = ''
 		self.port = 0
+		self.relayed_ip = None # set from RELAYEDHOST when the host is relayed, None otherwise
 
 		self.title = ''
 		self.map = ''
@@ -48,6 +49,14 @@ class Battle(Channel):
 
 		host = self._root.clientFromSession(self.host)
 		if client!=host:
+			# A relay host has to pre-authorise the joiner's address on the TURN server before
+			# the joiner's engine sends anything, because TURN drops traffic from an address it
+			# holds no permission for and tells neither end (RFC 5766 9.3). The joiner cannot
+			# supply the address itself: the packets that would carry it are the dropped ones.
+			# So it goes out first, ahead of JOINEDBATTLE, and only to a host that asked for
+			# relay support on a server that has a relay. Nobody else's conversation changes.
+			if 'r' in host.compat and self._root.turn_enabled():
+				host.Send('CLIENTIP %s %s' % (client.username, self._root.protocol.publicIP(client)))
 			self._root.broadcast('JOINEDBATTLE %s %s' % (self.battle_id, client.username), ignore=set([self.host, client.session_id])) 
 			scriptPassword = client.scriptPassword
 			if scriptPassword and 'sp' in host.compat:

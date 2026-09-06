@@ -18,11 +18,59 @@ from twisted.internet.threads import deferToThread
 
 separator = '-'*60
 
+# Relay hosting: how long a minted TURN credential stays valid, in seconds.
+# coturn re-checks the expiry embedded in the username on every request including the
+# Refresh that keeps an allocation alive, so a credential that expires mid-game kills a
+# running relay. The relay agent outlives the lobby connection, so nothing can mint a
+# replacement once the launcher has closed. The default is therefore sized against a long
+# game rather than against battle setup. Operators can change it on line 3 of
+# server_turn.txt.
+TURN_DEFAULT_TTL = 12 * 60 * 60
+
+# Relay hosting: the shortest credential lifetime a client is known to accept, in seconds.
+# Coilbox refuses to open a relayed battle on anything shorter and says so before anybody
+# joins. The figure is 5083s, the 99th percentile of 18418 real games from api.bar-rts.com
+# covering 22 to 29 August 2026, plus the relay agent's 32 second worst-case rebuild backoff.
+# The derivation is tomjn/coilbox#2091. It has to cover a whole game rather than just the
+# moment of hosting because coturn works the key out once when it creates the session and
+# checks later requests against the key it kept. What ends a game is expiry before the relay
+# has to be rebuilt, because a rebuild opens a new session, the credential is judged again,
+# and a dead one answers 401 (measured against coturn 4.17.2 in tomjn/coilbox#2041).
+TURN_CLIENT_MIN_TTL = 5115
+
 try:
 	from urllib2 import urlopen
 except:
 	# The urllib2 module has been split across several modules in Python 3.0
 	from urllib.request import urlopen
+
+def parse_turn_config(lines):
+	# server_turn.txt:
+	#   line 1: TURN URI, e.g. turn:relay.example.org:3478 (or turns:...:5349 for TLS)
+	#   line 2: static-auth-secret, shared with coturn's use-auth-secret
+	#   line 3: credential lifetime in seconds (optional)
+	# Raises ValueError with an operator-readable message on anything malformed. Half a
+	# config is worse than none: a bad lifetime expires credentials mid-game, and a URI
+	# containing a space produces a reply the client silently drops.
+	lines = [line for line in lines if line and not line.startswith('#')]
+	if len(lines) < 2:
+		raise ValueError('expected at least 2 lines (TURN URI, then shared secret), found %d' % len(lines))
+	uri, secret = lines[0], lines[1]
+	if any(c.isspace() for c in uri):
+		raise ValueError('the TURN URI on line 1 must not contain whitespace')
+	ttl = TURN_DEFAULT_TTL
+	if len(lines) > 2:
+		try:
+			ttl = int(lines[2])
+		except ValueError:
+			raise ValueError('the credential lifetime on line 3 must be a whole number of seconds, found %r' % lines[2])
+		if ttl <= 0:
+			raise ValueError('the credential lifetime on line 3 must be greater than zero, found %d' % ttl)
+	# A warning rather than an error: the server's job is to mint what the operator asked
+	# for, and a client other than coilbox may well accept less.
+	if ttl < TURN_CLIENT_MIN_TTL:
+		logging.warning('server_turn.txt line 3 sets a credential lifetime of %ds, below the %ds coilbox requires. Coilbox will refuse to open a relayed battle on a credential this short, so relay hosting will not work for its players. Another client may accept less. See the server_turn.txt section of the README.' % (ttl, TURN_CLIENT_MIN_TTL))
+	return uri, secret, ttl
 
 class DataHandler:
 
@@ -53,6 +101,9 @@ class DataHandler:
 		self.mail_smtp_port = 587
 		self.mail_smtp_user = None
 		self.mail_smtp_pass = None
+		self.turn_uri = None
+		self.turn_secret = None
+		self.turn_ttl = TURN_DEFAULT_TTL
 		self.trusted_proxies = set([])		
 		
 		self.server = 'TASSERVER'
@@ -140,6 +191,7 @@ class DataHandler:
 		self.ip_type_cache = {} #ip->state (iphub: 0=non-residential, 1=residential, 2=both)
 		self.recent_registrations = {} #ip_address->int
 		self.recent_renames = {} #user_id->int
+		self.recent_turn_credentials = {} #user_id->int
 		self.flood_limits = {
 			'fresh':{'msglength':1000, 'bytespersecond':1000, 'seconds':2}, # also the default
 			'user':{'msglength':10000, 'bytespersecond':2000, 'seconds':10},
@@ -538,6 +590,22 @@ class DataHandler:
 		except Exception as e:
 			logging.info('No server_verification_message.txt found, using defaults: %s' % e)
 
+		# relay hosting. Reset first so a reload that finds the file gone also stops
+		# advertising the 'r' compat flag, rather than keeping a stale secret in memory.
+		self.turn_uri = None
+		self.turn_secret = None
+		self.turn_ttl = TURN_DEFAULT_TTL
+		try:
+			with open('server_turn.txt', 'r') as f:
+				file_lines = [l.strip() for l in f.readlines()]
+			self.turn_uri, self.turn_secret, self.turn_ttl = parse_turn_config(file_lines)
+			# never log the secret
+			logging.info('Relay hosting enabled: TURN %s, credential lifetime %ds' % (self.turn_uri, self.turn_ttl))
+		except FileNotFoundError:
+			logging.info('No server_turn.txt found, relay hosting is disabled.')
+		except Exception as e:
+			logging.error('Could not load server_turn.txt, relay hosting is disabled: %s' % e)
+
 		
 		try:
 			if self.trusted_proxyfile:
@@ -759,6 +827,13 @@ class DataHandler:
 
 	def decrement_recent_renames(self):
 		self.decrement_dict(self.recent_renames)
+
+	def decrement_recent_turn_credentials(self):
+		self.decrement_dict(self.recent_turn_credentials)
+
+	def turn_enabled(self):
+		# relay hosting needs both halves of coturn's shared-secret scheme
+		return bool(self.turn_uri and self.turn_secret)
 
 	# the sourceClient is only sent for SAY*, and RING commands
 	# 2.1: takes an iterable of client objects directly (channel.user_clients,

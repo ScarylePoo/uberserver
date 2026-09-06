@@ -68,6 +68,8 @@ try:
 	recent_registration_loop.start(60*20)
 	recent_rename_loop = task.LoopingCall(_root.decrement_recent_renames)
 	recent_rename_loop.start(60*60*24*7)
+	recent_turn_credential_loop = task.LoopingCall(_root.decrement_recent_turn_credentials)
+	recent_turn_credential_loop.start(60*20)
 
 	# 3.1: size the reactor thread pool for off-reactor DB work (deferToThread).
 	reactor.suggestThreadPoolSize(_root.max_threads)

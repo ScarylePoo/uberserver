@@ -8,6 +8,9 @@ import socket
 import logging
 import datetime
 import base64
+import hashlib
+import hmac
+import ipaddress
 import json
 import traceback
 
@@ -112,6 +115,11 @@ restricted = {
 	'MYSTATUS',
 	'PORTTEST',
 	'JSON',
+	########
+	# relay hosting
+	'TURNCREDENTIALS',
+	'RELAYEDHOST',
+	'MOVERELAYEDHOST',
 	########
 	# bridge bots
 	'BRIDGECLIENTFROM',
@@ -366,7 +374,11 @@ class Protocol:
 		required_args = total_args - optional_args
 
 		if (numspaces < required_args):
+			# both lines: the sentence for a person, the tags for a client that wants to stop
+			# waiting on the command it sent without matching English (#51). Logging stays on
+			# the SERVERMSG so the server log gains nothing.
 			self.out_SERVERMSG(client, '%s failed. Incorrect arguments.' % command)
+			self.out_FAILED(client, command, 'Incorrect arguments.')
 			return False, []
 		if (required_args == 0 and numspaces == 0):
 			return True, []
@@ -403,6 +415,9 @@ class Protocol:
 			if args and len(args)>64:
 				args = args[:64] + "..."				
 			self.out_SERVERMSG(client, "%s failed. Unknown command. (args='%s')" % (command, args), True)
+			# the args stay out of the tags: the client sent them, and they are unvalidated bytes
+			# that would land inside a tab-separated frame.
+			self.out_FAILED(client, command, 'Unknown command.')
 			return False
 
 		for level in client.accesslevels:
@@ -412,6 +427,7 @@ class Protocol:
 
 		if (not allowed):
 			self.out_SERVERMSG(client, '%s failed. Insufficient rights.' % command, True)
+			self.out_FAILED(client, command, 'Insufficient rights.')
 			return False
 
 		function = getattr(self, 'in_' + command)
@@ -607,7 +623,45 @@ class Protocol:
 
 	def _validateIP(self, ipAddress):
 		return self.ipRegex_compiled.match(ipAddress)
-	
+
+	def publicIP(self, client):
+		# The address the rest of the internet sees this client at, which is not always the
+		# address it is connected from: behind a trusted proxy the socket carries the proxy's
+		# address and the client's own arrives in the LOGIN local_ip field (_login_finish_now).
+		if client.ip_address in self._root.trusted_proxies:
+			return client.local_ip
+		return client.ip_address
+
+	def _validRelayedHostAddress(self, ip):
+		# Returns (address, reason). RELAYEDHOST lets a client choose what everybody else is
+		# told to connect to, so the address has to be one the rest of the internet can reach
+		# before it goes anywhere near BATTLEOPENED.
+		try:
+			address = ipaddress.ip_address(ip)
+		except ValueError:
+			return None, '%s is not an IP address' % ip
+
+		# is_global is the whole public/not-public test and it covers both families, so IPv6
+		# is not an afterthought here: it is false for loopback, every private range, the
+		# link-local ranges, carrier-grade NAT and the documentation ranges. Multicast is the
+		# one gap in it, and a battle lives at one host rather than a group.
+		if not address.is_global or address.is_multicast:
+			return None, '%s is not a public address, so nobody could join a battle there' % ip
+
+		# The lobby's own address is a public one, and branch 2 of client_AddBattle already
+		# hands it out for port-forwarded hosts. A client naming it for itself would take
+		# that over, so it is refused however the operator has the lobby addressed.
+		for own in (self._root.online_ip, self._root.local_ip):
+			try:
+				if own and ipaddress.ip_address(own) == address:
+					return None, '%s is this lobby server, not a relay' % ip
+			except ValueError:
+				continue
+
+		# Canonical form, not the client's spelling: 2001:DB8::0:1 and 2001:db8::1 are one
+		# address and only one of them should ever reach a joining client.
+		return str(address), ''
+
 	def _validLegacyPasswordSyntax(self, password):
 		# checks if an old-style password is correctly encoded
 		if (not password):
@@ -734,6 +788,17 @@ class Protocol:
 		for cid, client in self._root.usernames.items():
 			client.Send('BATTLECLOSED %s' % battle.battle_id)
 
+	def broadcast_MoveBattle(self, battle):
+		'''sends the protocol for a battle that changed address without closing'''
+		# Gated on 'r' for the same reason CLIENTIP is. This is the only message in the
+		# protocol that changes a battle's address after BATTLEOPENED, so no client that
+		# predates relay hosting has a handler for it, and 'r' is exactly the flag that says
+		# "I understand relay-hosted battles". A client without it sees nothing new.
+		for cid, client in self._root.usernames.items():
+			if 'r' not in client.compat:
+				continue
+			client.Send('BATTLEHOSTMOVED %s %s %s' % (battle.battle_id, battle.relayed_ip, battle.port))
+
 	def broadcast_SendBattle(self, battle, data, sourceClient=None, flag=None, not_flag=None):
 		# the sourceClient is only sent for SAY*, and RING commands
 		if sourceClient:
@@ -787,6 +852,8 @@ class Protocol:
 
 		host = self.clientFromSession(battle.host)
 		# IP translation logic:
+		# 0. If the host named a relay address with RELAYEDHOST, that address is the battle,
+		#    for every recipient. Skip the rest.
 		# 1. If the joining client has the same WAN IP as the host, they are on the same LAN.
 		#    Send the host's local/LAN IP so they can connect directly.
 		# 2. If the host is on the same LAN as the lobby server (host's WAN IP matches the
@@ -807,7 +874,15 @@ class Protocol:
 					return False
 			return False
 
-		if host.ip_address == client.ip_address:
+		if battle.relayed_ip:
+			# A relayed battle lives at a TURN allocation on the relay, a public address on a
+			# machine the host does not own. The three branches below all work an address out
+			# from the host's own connection, so all three name the host's machine, which under
+			# a relay is the address nobody can reach. The same-WAN-IP branch included: two
+			# players behind one NAT still reach a relayed battle through the relay rather than
+			# across their own LAN, so there is no recipient this is worth skipping for.
+			translated_ip = battle.relayed_ip
+		elif host.ip_address == client.ip_address:
 			# Same WAN IP - both on same LAN, use host's local IP
 			translated_ip = host.local_ip
 		elif _is_private_ip(host.ip_address) and not _is_private_ip(client.ip_address):
@@ -2222,6 +2297,14 @@ class Protocol:
 		@required.sentence.str title: The battle's title.
 		@required.sentence.str modName: The mod name.
 		'''
+		# Consumed here rather than on the way out, ahead of the LEAVEBATTLE below which also
+		# forgets it, so that an address only ever belongs to the one OPENBATTLE it arrived
+		# with. A host whose OPENBATTLE is refused sends the pair again (coilbox builds both
+		# lines together), and an address that survived a refusal would be a stale one waiting
+		# to attach itself to some later battle.
+		relayed_ip = client.relayed_host_ip
+		client.relayed_host_ip = None
+
 		if client.current_battle:
 			self.in_LEAVEBATTLE(client)
 
@@ -2302,6 +2385,9 @@ class Protocol:
 		battle.type = type
 		battle.natType = natType
 		battle.port = port
+		# Unconditional: a Battle object is reused for the same host's next battle, so a
+		# relayed one must not leave its address behind for a later direct one.
+		battle.relayed_ip = relayed_ip
 		battle.title = title
 		battle.map = map
 		battle.maphash = maphash
@@ -2363,8 +2449,7 @@ class Protocol:
 				client.Send('JOINBATTLEFAILED Waiting for JOINBATTLEACCEPT/JOINBATTLEDENIED from host')
 			else:
 				self.addPendingBattle(client, battle)
-			client_ip = client.local_ip if client.ip_address in self._root.trusted_proxies else client.ip_address
-			host.Send('JOINBATTLEREQUEST %s %s' % (username, client_ip))
+			host.Send('JOINBATTLEREQUEST %s %s' % (username, self.publicIP(client)))
 			return
 		self.removePendingBattle(client)
 		battle.joinBattle(client)
@@ -2484,6 +2569,10 @@ class Protocol:
 		'''
 		Leave current battle.
 		'''
+		# A host that walks away without opening the battle it asked for should not have its
+		# relay address waiting for whatever it opens next.
+		client.relayed_host_ip = None
+
 		battle = self.getCurrentBattle(client)
 		if not battle:
 			self.out_FAILED(client, "LEAVEBATTLE", "not in battle")
@@ -3269,13 +3358,188 @@ class Protocol:
 		client.Remove(reason)
 
 	def in_LISTCOMPFLAGS(self, client):
+		# 'r' is how a client learns whether this server offers relay hosting, so it is only
+		# advertised once a TURN server is configured. It stays in flag_map either way: a
+		# client that sends 'r' to a server with no relay must not be told its flag is
+		# unknown, it must simply get a clean TURNCREDENTIALSFAILED if it asks.
 		flags = ""
 		for flag in flag_map:
+			if flag == 'r' and not self._root.turn_enabled():
+				continue
 			if len(flags)>0:
 				flags += " " + flag
 			else:
 				flags = flag
 		client.Send("COMPFLAGS %s" %(flags))
+
+	def in_TURNCREDENTIALS(self, client):
+		'''
+		Request a time-limited TURN credential for relay hosting.
+
+		Replies TURNCREDENTIALS <uri> <username> <password> <ttl_seconds> on success, or
+		TURNCREDENTIALSFAILED <reason> otherwise. The scheme is
+		draft-uberti-behave-turn-rest-00, which coturn implements as use-auth-secret:
+		the username is "<unix expiry>:<lobby account id>" and the password is
+		base64(hmac_sha1(shared secret, username)). coturn recomputes both from the same
+		secret, so it never has to talk to the lobby or hold any session state.
+		'''
+		if not self._root.turn_enabled():
+			client.Send('TURNCREDENTIALSFAILED This server has no relay configured')
+			return
+
+		ttl = self._root.turn_ttl
+		username = '%d:%s' % (int(time.time()) + ttl, client.user_id)
+		password = base64.b64encode(hmac.new(self._root.turn_secret.encode('utf-8'), username.encode('utf-8'), hashlib.sha1).digest()).decode('utf-8')
+		uri = self._root.turn_uri
+
+		# The reply is exactly four space-separated fields and the client refuses the whole
+		# line if any of them is empty or shifted. Whitespace anywhere but the separators
+		# would do that silently, so check rather than trust: the URI comes from operator
+		# config and the account id has been a string on its way here.
+		for field in (uri, username, password):
+			if not field or any(c.isspace() for c in field):
+				logging.error('[%s] <%s>: refusing to send a malformed TURN credential' % (client.session_id, client.username))
+				client.Send('TURNCREDENTIALSFAILED Server could not build a valid credential, please tell an admin')
+				return
+
+		# Rate limit per account, matching in_REGISTER's per-IP limit and in_RENAMEACCOUNT's
+		# per-user one: 3 in flight, decaying by one every 20 minutes (server.py). Stays after
+		# the checks above so a request that got no credential does not burn a slot.
+		recent = self._root.recent_turn_credentials.get(client.user_id, 0)
+		if recent >= 3:
+			client.Send('TURNCREDENTIALSFAILED too many recent credential requests, please try again later')
+			return
+		self._root.recent_turn_credentials[client.user_id] = recent + 1
+
+		client.Send('TURNCREDENTIALS %s %s %s %d' % (uri, username, password, ttl))
+
+	def in_RELAYEDHOST(self, client, ip, port):
+		'''
+		Name the address the next battle this client opens is reachable at.
+
+		Sent immediately before OPENBATTLE by a host whose battle lives at a TURN allocation
+		on the relay rather than on its own machine. The server cannot work that address out:
+		everything it knows about the host is the connection the host is talking to it on, and
+		that is the machine nobody can reach, which is the reason the allocation exists.
+
+		The address is held against the client and consumed by its next OPENBATTLE, so it can
+		never outlive the one battle it was sent for. natType is untouched: a TURN allocation
+		is an ordinary public UDP address and a joining client needs to understand nothing.
+
+		Refused as RELAYEDHOSTFAILED <reason>, free text meant to be read by whoever is
+		trying to host.
+
+		@required.str ip: The relay allocation's address, IPv4 or IPv6.
+		@required.int port: The relay allocation's port. The battle is advertised at the port
+		OPENBATTLE carries, so this one is range-checked and then discarded. MOVERELAYEDHOST
+		is the command whose port is used, because there is no OPENBATTLE behind it.
+		'''
+		if not self._root.turn_enabled():
+			client.Send('RELAYEDHOSTFAILED This server has no relay configured')
+			return
+
+		# Unlike TURNCREDENTIALS, which hands out something a client can only use, this
+		# decides what other people are told to connect to. A client that did not ask for
+		# relay support has no business naming its own address.
+		if 'r' not in client.compat:
+			client.Send('RELAYEDHOSTFAILED Your client did not ask for relay support at login')
+			return
+
+		try:
+			port = int(port)
+		except ValueError:
+			client.Send('RELAYEDHOSTFAILED Port is not a number: %s' % port)
+			return
+		if port < 1 or port > 65535:
+			client.Send('RELAYEDHOSTFAILED Port is out of range: 1-65535: %d' % port)
+			return
+
+		address, reason = self._validRelayedHostAddress(ip)
+		if not address:
+			client.Send('RELAYEDHOSTFAILED %s' % reason)
+			return
+
+		client.relayed_host_ip = address
+
+	def in_MOVERELAYEDHOST(self, client, ip, port):
+		'''
+		Move the open battle this client is hosting to a new relay address and port.
+
+		Sent on its own, with no OPENBATTLE behind it, by a relay host whose TURN allocation
+		was lost and rebuilt somewhere else. The room and everybody in it stay where they are,
+		which is the whole point: closing and reopening the battle would empty it.
+
+		This is a separate command from RELAYEDHOST rather than the same one told apart by
+		whether the sender is already hosting, because that test does not tell them apart. A
+		relay host reopening its battle sends RELAYEDHOST while still hosting the old one, and
+		in_OPENBATTLE reads the staged address before the in_LEAVEBATTLE that closes it. One
+		command would read that RELAYEDHOST as a move, apply it to a battle about to be
+		destroyed, and leave the new battle advertised at the host's own unreachable machine.
+
+		The port here is used, unlike RELAYEDHOST's. There is no OPENBATTLE to carry one, and
+		a rebuilt allocation moves the address and the port together, so dropping it would
+		move the battle to the right address on the wrong port and leave it just as
+		unreachable as before.
+
+		A battle that was never relayed is refused. Everybody already in it, and every battle
+		list on the server, holds a direct address that still works, and there is no message
+		that can correct them, so converting it would break a working battle rather than
+		repair a broken one. A battle's addressing scheme is fixed for its lifetime.
+
+		natType is untouched, as at OPENBATTLE: a TURN allocation is an ordinary public UDP
+		address and a joining client needs to understand nothing.
+
+		On success, BATTLEHOSTMOVED <battle_id> <ip> <port> goes to every logged-in client
+		that asked for relay support, including the host. Refused as MOVERELAYEDHOSTFAILED
+		<reason>, free text meant to be read by whoever is trying to host.
+
+		@required.str ip: The rebuilt allocation's address, IPv4 or IPv6.
+		@required.int port: The rebuilt allocation's port. This is the port the battle is
+		advertised at from now on.
+		'''
+		if not self._root.turn_enabled():
+			client.Send('MOVERELAYEDHOSTFAILED This server has no relay configured')
+			return
+
+		if 'r' not in client.compat:
+			client.Send('MOVERELAYEDHOSTFAILED Your client did not ask for relay support at login')
+			return
+
+		battle = self.getCurrentBattle(client)
+		if not battle:
+			client.Send('MOVERELAYEDHOSTFAILED You are not hosting a battle')
+			return
+
+		# Explicit, and ahead of everything else about the battle: a spectator sitting in
+		# somebody else's battle must not be able to send everybody in it to an address of
+		# its choosing. canChangeSettings is the host test every other host-only command uses.
+		if not battle.canChangeSettings(client):
+			client.Send('MOVERELAYEDHOSTFAILED Only the host of a battle can move it')
+			return
+
+		if not battle.relayed_ip:
+			client.Send('MOVERELAYEDHOSTFAILED This battle was not opened through a relay')
+			return
+
+		try:
+			port = int(port)
+		except ValueError:
+			client.Send('MOVERELAYEDHOSTFAILED Port is not a number: %s' % port)
+			return
+		if port < 1 or port > 65535:
+			client.Send('MOVERELAYEDHOSTFAILED Port is out of range: 1-65535: %d' % port)
+			return
+
+		address, reason = self._validRelayedHostAddress(ip)
+		if not address:
+			client.Send('MOVERELAYEDHOSTFAILED %s' % reason)
+			return
+
+		battle.relayed_ip = address
+		battle.port = port
+		# Anybody who joins or logs in after this reads the new pair out of the battle, so
+		# BATTLEHOSTMOVED only has to reach the clients already holding the old one.
+		self.broadcast_MoveBattle(battle)
 
 	def in_KICK(self, client, username, reason=''):
 		# kick target username from server

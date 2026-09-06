@@ -52,6 +52,9 @@ services:
       # Optional: mount custom motd / agreement files
       # - ./server_motd.txt:/app/server_motd.txt:ro
       # - ./server_agreement.txt:/app/server_agreement.txt:ro
+      # Relay hosting. The lobby reads this from its working directory, so it has
+      # to be mounted to reach the container. See docs/ops/relay-hosting-setup.md
+      # - ./server_turn.txt:/app/server_turn.txt:ro
     networks:
       - internal
     sysctls:
@@ -60,6 +63,46 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+
+  # Optional TURN relay, for players who cannot forward a port and host through
+  # a relay instead. Opt-in: nothing here starts unless you ask for the profile.
+  #
+  #   cp turnserver.conf.example turnserver.conf   # then edit it
+  #   docker compose --profile relay up -d
+  #
+  # Copy the config first. Docker creates a directory in place of a missing bind
+  # mount source, and coturn then starts with no configuration at all.
+  #
+  # The relay does not talk to the lobby and is not on the internal network. The
+  # only thing tying the two together is the shared secret, which has to be the
+  # same string here and on line 2 of server_turn.txt. See the README, under
+  # "Relay Hosting (TURN)", including the case for running this somewhere else
+  # entirely rather than on the lobby machine.
+  coturn:
+    profiles:
+      - relay
+    image: coturn/coturn:4.17.2
+    restart: unless-stopped
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    # Host networking, because coturn hands out one UDP port per allocation from
+    # the min-port..max-port range in its config, and Docker expands a published
+    # port range into one forwarding rule per port. Publishing coturn's default
+    # 16384 port range that way is not something to do casually.
+    #
+    # If host networking is not available to you, drop this line, narrow
+    # min-port/max-port to something you have sized, and publish that range:
+    #   ports:
+    #     - "3478:3478/udp"
+    #     - "3478:3478/tcp"
+    #     - "49152-49401:49152-49401/udp"
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # TLS on 5349. Uncomment these with the tls-listening-port, cert and pkey
+      # lines in turnserver.conf, and point them at a certificate the players'
+      # clients trust. Never commit the key.
+      # - ./turn_cert.pem:/etc/coturn/turn_cert.pem:ro
+      # - ./turn_pkey.pem:/etc/coturn/turn_pkey.pem:ro
 
 volumes:
   db_data:

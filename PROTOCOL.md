@@ -149,6 +149,13 @@ Clients advertise optional protocol capabilities via compatibility flags. Suppor
 without it, just with less information. See [Channel history](#61-channel-history-getchannelmessages)
 and [Offline direct messages](#82-offline-direct-messages).
 
+`r` is the one flag the server advertises conditionally. `LISTCOMPFLAGS` includes it only
+when the server has a TURN relay configured, because a client reads `COMPFLAGS` to decide
+whether to offer relay hosting at all. It stays in `flag_map` on every server, so a client
+that sends `r` to a server with no relay is never told the flag is unknown: it just gets
+`TURNCREDENTIALSFAILED` if it asks for a credential. See
+[Relay hosting](#71-relay-hosting-turncredentials-clientip-relayedhost-moverelayedhost).
+
 Deprecated/removed flags still recognised for negotiation: `cl`, `t`, `l`, `a`, `m`,
 `p`, `et` — these represent behaviour that is now mandatory or was removed. **[GAP]**
 document `LISTCOMPFLAGS` output and exactly how/when a client declares its flags during
@@ -171,7 +178,7 @@ connection holds the listed level (higher levels inherit lower ones in practice 
 | **user — channel** | `CHANNELS`, `CHANNELTOPIC`, `JOIN`, `LEAVE`, `SAY`, `SAYEX`, `SAYPRIVATE`, `SAYPRIVATEEX`, `GETCHANNELMESSAGES` |
 | **user — account** | `GETUSERINFO`, `RENAMEACCOUNT`, `CHANGEPASSWORD`, `CHANGEEMAILREQUEST`, `CHANGEEMAIL`, `RESENDVERIFICATION` |
 | **user — social** | `IGNORE`, `UNIGNORE`, `IGNORELIST`, `FRIENDREQUEST`, `ACCEPTFRIENDREQUEST`, `DECLINEFRIENDREQUEST`, `UNFRIEND`, `FRIENDLIST`, `FRIENDREQUESTLIST` |
-| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON` |
+| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON`, `TURNCREDENTIALS`, `RELAYEDHOST`, `MOVERELAYEDHOST` |
 | **user — bridge** | `BRIDGECLIENTFROM`, `UNBRIDGECLIENTFROM`, `JOINFROM`, `LEAVEFROM`, `SAYFROM` |
 | **user — deprecated** | `MUTE`, `MUTELIST`, `SETCHANNELKEY`, `UNMUTE`, `SAYBATTLE`, `SAYBATTLEEX`, `SAYBATTLEPRIVATEEX`, `FORCELEAVECHANNEL`, `GETINGAMETIME` |
 | **mod** | `GETUSERID`, `GETIP`, `FINDIP`, `SETBOTMODE`, `CREATEBOTACCOUNT`, `RESETUSERPASSWORD`, `KICK`, `BAN`, `BANSPECIFIC`, `UNBAN`, `BLACKLIST`, `UNBLACKLIST`, `LISTBANS`, `LISTBLACKLIST` |
@@ -307,6 +314,226 @@ happens.
 **[GAP]** This exchange raised on every path until it was repaired, so no deployed client has
 been observed using it. Verify against a real hole-punching client before relying on the
 detail here.
+### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`, `RELAYEDHOST`, `MOVERELAYEDHOST`)
+
+A player who cannot forward a port can host through a TURN relay instead. The relay
+allocation is an ordinary public address, so the battle is advertised in `BATTLEOPENED` and
+joined like any other direct host. The lobby's only job is to vouch for its own users, which
+it does by minting a credential the relay will accept.
+
+```
+C> TURNCREDENTIALS
+S> TURNCREDENTIALS <uri> <username> <password> <ttl_seconds>
+S> TURNCREDENTIALSFAILED <reason>
+```
+
+Requires login. The success reply is exactly four space-separated fields and none of `uri`,
+`username` or `password` may be empty or contain a space, because a space in any of them
+shifts every field after it. `ttl_seconds` is a plain base-10 integer and comes last, so a
+client can use it to detect a shifted line. The failure reason is the rest of the line and
+may contain spaces. It is free text meant to be shown to a person.
+
+The credential is `draft-uberti-behave-turn-rest-00`, which coturn implements as
+`use-auth-secret`:
+
+```
+username = "<unix expiry timestamp>:<lobby account id>"
+password = base64(hmac_sha1(shared secret, username))
+```
+
+The relay recomputes the HMAC from a `static-auth-secret` it shares with the lobby, so the
+two processes never talk and neither holds session state. The secret is server configuration
+(`server_turn.txt`, see the README) and is never sent to a client.
+
+`ttl_seconds` is how long the credential stays valid, 43200 (12 hours) by default and set by
+the operator. It is sized against a whole game rather than battle setup. coturn judges the
+credential when it creates the session and checks later requests against the key it kept, so
+an expiry passing under a live allocation costs nothing. What costs a game is expiry before
+the relay has to be rebuilt, because a rebuild opens a new session and a dead credential is
+refused. The relay outlives the lobby connection, so nothing can mint a replacement at that
+point. The server warns at startup if the configured lifetime is below what clients accept,
+which the README's `server_turn.txt` section sources and explains.
+
+Failure cases, all reported as `TURNCREDENTIALSFAILED <reason>`:
+- the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
+- the caller has asked too often. The allowance is 3 credentials, decaying by one every 20
+  minutes, and it is held against the lobby account rather than the connection, so
+  reconnecting does not clear it. `REGISTER` uses the same allowance and the same decay,
+  counted per IP
+- the server could not build a credential whose fields are free of spaces, which means its
+  TURN URI is misconfigured
+
+#### Joiner addresses (`CLIENTIP`)
+
+A TURN relay only forwards traffic from an address the host has already installed a
+permission for. Traffic from any other address is dropped, and neither end is told
+(RFC 5766 section 9.3). So a relay host has to know each joiner's address before that
+joiner's engine sends its first packet, and the joiner cannot supply it: the packets that
+would carry it are the ones being dropped. The lobby is the only party that knows it in time.
+
+```
+S> CLIENTIP <username> <ip>
+```
+
+Sent to the host of a battle, once per join, immediately before the `JOINEDBATTLE` that
+announces the same user. Players, spectators and mid-game joiners are all the same case, and
+a host that gates joins behind `JOINBATTLEREQUEST` (the `b` flag) gets it after it accepts,
+not before. Nothing is sent for the host's own join.
+
+`<ip>` is the address the outside world sees the joiner at, which is what a TURN permission
+has to match. Where the joiner reached the lobby through a trusted proxy that is the address
+it gave at login, not the proxy's, the same choice `JOINBATTLEREQUEST` makes.
+
+There is no port. TURN permissions match on IP alone and ignore the port (RFC 5766
+section 9), so a port here would be a number with nothing to do.
+
+Two conditions, both required, decide whether the host gets this at all:
+- the host advertised `r` at login, so it knows what the message is for
+- the server has a relay configured, the same `server_turn.txt` that gates `TURNCREDENTIALS`
+
+A host meeting neither sees a byte-for-byte unchanged battle. `CLIENTIP` is a strict
+addition, and no existing client receives it.
+
+`CLIENTIPPORT` is a different message and is unchanged. It carries a UDP port for NAT
+punching, is sent only for battles with a `natType` above zero, and needs the joiner to have
+a UDP source port already registered. A relay joiner has none of that, and widening
+`CLIENTIPPORT` to cover it would change what an existing autohost is told.
+
+#### The battle's address (`RELAYEDHOST`)
+
+A relayed battle lives at a TURN allocation on the relay, which is a public address on a
+machine the host does not own. The server cannot work that out for itself. Everything it knows
+about a host is the connection the host is talking to it on, and for a relayed host that
+connection names the machine nobody can reach, which is the reason the allocation exists. So
+the host has to say.
+
+```
+C> RELAYEDHOST <ip> <port>
+C> OPENBATTLE <type> <natType> <key> <port> ...
+S> RELAYEDHOSTFAILED <reason>
+```
+
+Requires login and the `r` flag. Two plain fields, no tab sentence, and `<ip>` may be IPv4 or
+IPv6. There is no reply on success. The address is held against the connection and consumed by
+that client's next `OPENBATTLE`, which advertises the battle at it in `BATTLEOPENED` instead of
+working an address out from the host's connection. It is then forgotten, so a second
+`OPENBATTLE` is an ordinary battle again. `LEAVEBATTLE` forgets it too, and so does
+disconnecting, so an address can never attach itself to a battle it was not sent for.
+
+The server neither reads nor changes `natType`, and a relay host sends `0` like a direct host.
+A TURN allocation is an ordinary public UDP address, so a joining client dials a relayed battle
+exactly as it dials a direct one. There is nothing here for SpringLobby or Chobby to implement,
+and inventing a NAT mode would have cost every one of them a change.
+
+The `<port>` is in this line as well as in `OPENBATTLE`. `OPENBATTLE` is the one the battle is
+advertised at, so the server range-checks this one and then discards it. Send the real one
+anyway, because an out-of-range value is refused. `MOVERELAYEDHOST` is the command whose port
+is used, because it has no `OPENBATTLE` behind it to carry one.
+
+All three of the address translations `BATTLEOPENED` normally does are skipped, including the
+one that hands a joiner the host's LAN address when the two share a WAN address. Two players
+behind one NAT reach a relayed battle through the relay rather than across their own LAN, so
+every recipient is told the same relay address.
+
+Failure cases, all reported as `RELAYEDHOSTFAILED <reason>`, free text meant to be shown to
+whoever is trying to host:
+- the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
+- the client did not send `r` at login. Unlike `TURNCREDENTIALS`, which hands out something
+  only the caller can use, this decides what everybody else is told to connect to
+- the address does not parse as an IP address at all
+- the address is not a public one: loopback, any private or link-local range, carrier-grade
+  NAT, multicast, the documentation ranges, or the lobby server's own address. Both families
+  are covered by the same check
+- the port is not a whole number between 1 and 65535
+
+The server does not check that the address belongs to the relay it minted a credential for.
+`server_turn.txt` holds a URI whose host is usually a name, coturn's `relay-ip` is allowed to
+differ from the address it signals on, and resolving a name inside the command handler would
+stall the reactor.
+
+A client that sends no `RELAYEDHOST` sees a byte-for-byte unchanged battle.
+
+#### Moving an open battle (`MOVERELAYEDHOST`)
+
+A TURN allocation can be lost, and the replacement the host builds is on a different address
+and a different port. The battle is still open and the room is still full, but it is advertised
+at a pair nobody can reach. `MOVERELAYEDHOST` moves it without closing it, so the room and
+everybody in it stay where they are.
+
+```
+C> MOVERELAYEDHOST <ip> <port>
+S> BATTLEHOSTMOVED <battle_id> <ip> <port>
+S> MOVERELAYEDHOSTFAILED <reason>
+```
+
+Requires login, the `r` flag, and that the sender is the host of an open battle that was
+opened through a relay. Two plain fields, no tab sentence, and `<ip>` may be IPv4 or IPv6, as
+in `RELAYEDHOST`. There is no separate success reply: the host receives the same
+`BATTLEHOSTMOVED` everybody else does.
+
+This port is used, unlike `RELAYEDHOST`'s. There is no `OPENBATTLE` behind this line to carry
+one, and a rebuilt allocation moves the address and the port together, so a move that changed
+only the address would put the battle on the right machine at the wrong port and leave it
+exactly as unreachable as it was. From here on the battle is advertised at this pair, and the
+three address translations `BATTLEOPENED` normally does stay skipped.
+
+`natType` is untouched and stays `0`, for the reason it is `0` at `OPENBATTLE`: a TURN
+allocation is an ordinary public UDP address and a joining client needs to understand nothing
+about it.
+
+This is a separate command rather than a second `RELAYEDHOST` because "the sender is already
+hosting" does not tell the two cases apart. A relay host reopening its battle sends
+`RELAYEDHOST` while the old battle is still open, and the server reads that staged address
+before the `LEAVEBATTLE` which closes the old battle. One command would read that line as a
+move, apply it to a battle about to be destroyed, and advertise the new battle at the host's
+own unreachable machine.
+
+**What other clients see.** `BATTLEHOSTMOVED` goes to every logged-in client that sent `r` at
+login, including the host, and to nobody else. Anyone who joins or logs in after a move reads
+the new pair out of the ordinary `BATTLEOPENED` they are sent for the battle, so the message
+only has to reach clients that are already holding the old pair.
+
+A client that did not send `r` keeps the old address and port until it disconnects and receives
+the battle afresh. That is a stale list entry rather than a break, and it applies to people
+sitting in the room as much as to people looking at the list. There is nothing better available
+in this protocol:
+
+- no message changes a battle's address after `BATTLEOPENED`. `UPDATEBATTLEINFO` carries the
+  spectator count, the lock, the map and its hash, and no address
+- re-sending `BATTLEOPENED` for the same battle id does not work. SpringLobby asserts that the
+  battle does not already exist, throws, and logs a warning, so the line is dropped. Chobby
+  rebuilds its record of the battle from the new line and loses the user list with it
+- `HOSTPORT` is the closest existing message and still does not fit. It carries a port and no
+  address, and SpringLobby ignores it unless the battle's `natType` is one of the NAT-traversal
+  modes, which a relayed battle's never is
+- `BATTLECLOSED` followed by `BATTLEOPENED` would refresh the list for onlookers, at the price
+  of telling every bot, bridge and autohost on the server that a live battle closed, and firing
+  SpringLobby's "opened battle" notification on every relay rebuild. It cannot help the people
+  in the room either, because a client told that its own battle closed leaves it
+
+For the case this exists for, a stale entry costs that client nothing it had: the address it is
+still holding had already stopped working. A client that wants the correct one asks for `r` at
+login.
+
+**Battles that were never relayed are not moved.** A battle opened without a `RELAYEDHOST` is
+advertised at an address that works, and everyone holding it would be stranded there by a move
+nothing can tell them about. Converting it would break a working battle rather than repair a
+broken one, so a battle's addressing scheme is fixed for its lifetime.
+
+Failure cases, all reported as `MOVERELAYEDHOSTFAILED <reason>`, free text meant to be shown to
+whoever is trying to host:
+- the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
+- the client did not send `r` at login
+- the sender is not in a battle
+- the sender is in a battle but is not its host. A spectator must not be able to send everybody
+  in somebody else's battle to an address of its choosing
+- the battle was not opened through a relay
+- the address does not parse as an IP address at all
+- the address is not a public one, by the same check `RELAYEDHOST` applies
+- the port is not a whole number between 1 and 65535
+
+A refused move changes nothing and announces nothing, and a client that never sends
+`MOVERELAYEDHOST` sees a byte-for-byte unchanged battle.
 
 ---
 
@@ -496,13 +723,41 @@ the README.
 
 ## 14. Error & response conventions
 
-Today, failures are reported in two main ways (**[GAP]** verify completeness):
+Today, failures are reported in three main ways (**[GAP]** verify completeness):
 - `DENIED <reason>` for command-specific rejections (e.g. login).
 - `SERVERMSG <free text>` for general failures ("`<CMD> failed. <reason>`").
+- `FAILED msg=<free text>\tcmd=<COMMAND>` for the same, in a form a client can branch on.
 
 There is **no stable machine-readable error-code scheme** — reasons are human free-text.
 A future protocol-compatible improvement is to keep the free text but prefix a stable
 token clients can branch on. Tracked under [Known gaps](#known-gaps--open-questions).
+
+### A command the server would not run
+
+A command the server refuses before running it is answered with both a `SERVERMSG` and a
+`FAILED`, carrying the same reason. There are three such refusals:
+
+```
+S> SERVERMSG <COMMAND> failed. Incorrect arguments.
+S> FAILED msg=Incorrect arguments.	cmd=<COMMAND>
+
+S> SERVERMSG <COMMAND> failed. Unknown command. (args='<args>')
+S> FAILED msg=Unknown command.	cmd=<COMMAND>
+
+S> SERVERMSG <COMMAND> failed. Insufficient rights.
+S> FAILED msg=Insufficient rights.	cmd=<COMMAND>
+```
+
+The `cmd` tag is the command as the client sent it, upper-cased. A client waiting on a reply
+can use it to tell "you sent me something I do not implement" from an announcement, without
+matching English. The `SERVERMSG` wording is not pinned, and does vary between deployed
+servers, which is why the `FAILED` line is there.
+
+The unknown-command `SERVERMSG` echoes the arguments, truncated at 64 characters. The `FAILED`
+line does not, because those are unvalidated bytes from the client and the frame is
+tab-separated.
+
+Both lines are sent for every refusal, so a client that reads only `SERVERMSG` sees no change.
 
 ---
 
