@@ -280,6 +280,40 @@ bots, script_tags, startrects, map/mod/engine, player/spectator limits.
 - Host force-commands: `FORCEALLYNO`, `FORCETEAMNO`, `FORCETEAMCOLOR`,
   `FORCESPECTATORMODE`, `HANDICAP`, `KICKFROMBATTLE`, `RING`.
 
+### Hole punching (`UDPSOURCEPORT`, `CLIENTIPPORT`)
+
+A battle opened with `natType` above 0 expects its players to reach each other by punching
+holes through their routers, which needs each end to know the other's public address and UDP
+port. The lobby is what tells them.
+
+A client finds its own public port by sending its **username**, as one newline-terminated
+line, to the UDP service on port 8201. The server answers `PONG` on that socket and then, over
+the client's ordinary TCP connection:
+
+```
+S> UDPSOURCEPORT <port>
+```
+
+The port is the source port the datagram arrived from, which is the one the client's router
+mapped. It is remembered for the connection, so a client can probe before it joins anything.
+
+If the sender is in a battle with `natType` above 0, that battle's host is also told:
+
+```
+S> CLIENTIPPORT <username> <ip> <port>
+```
+
+The host gets the same line when somebody joins its battle having already probed, so the two
+orderings, probe-then-join and join-then-probe, both reach it. A host is never sent its own
+address.
+
+A datagram naming a user is only acted on if it arrives from an address that user is already
+known to hold. One that does not is reported to moderators as a spoof and nothing else
+happens.
+
+**[GAP]** This exchange raised on every path until it was repaired, so no deployed client has
+been observed using it. Verify against a real hole-punching client before relying on the
+detail here.
 ### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`, `RELAYEDHOST`, `MOVERELAYEDHOST`)
 
 A player who cannot forward a port can host through a TURN relay instead. The relay

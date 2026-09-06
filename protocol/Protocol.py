@@ -469,21 +469,33 @@ class Protocol:
 		client = self.clientFromUsername(username)
 		if not client:
 			return
-		if ip == client.local_ip or ip == client.ip_address:
-			client.Send('UDPSOURCEPORT %i'%udpport)
-			battle_id = client.current_battle
-			if not battle_id in self._root.battles: return
-			battle = self._root.battles[battle_id]
-			if battle:
-				client.udpport = udpport
-				client.hostport = udpport
-				host = battle.host
-				if not host == client.session_id:
-					self._root.usernames[host].SendBattle(battle, 'CLIENTIPPORT %s %s %s'%(username, ip, udpport))
-			else:
-				client.udpport = udpport
-		else:
+		if ip != client.local_ip and ip != client.ip_address:
 			self._root.admin_broadcast('NAT spoof from %s pretending to be <%s>'%(ip,username))
+			return
+
+		client.Send('UDPSOURCEPORT %i'%udpport)
+
+		# recorded whether or not there is a battle yet, because a client probes for its source
+		# port before it joins one and Battle.joinBattle reads this to decide whether it can
+		# tell the host. The old code only recorded it below an early return that fired when
+		# the client was in no battle, so the ordering that actually happens left it at 0.
+		client.udpport = udpport
+
+		battle = self._root.battles.get(client.current_battle)
+		if not battle:
+			return
+		client.hostport = udpport
+
+		# natType > 0 matches Battle.joinBattle's gate on the same message. This send site never
+		# had one, but it never ran either, so gating it keeps CLIENTIPPORT to the hole-punched
+		# battles it is for rather than newly sending it to the host of every direct battle
+		# somebody happens to probe from.
+		if battle.natType > 0 and battle.host != client.session_id:
+			# battle.host is a session id, not a username, and Client defines no SendBattle,
+			# so this line raised before it could send anything. One recipient, so Send.
+			host = self._root.clientFromSession(battle.host)
+			if host:
+				host.Send('CLIENTIPPORT %s %s %s'%(username, ip, udpport))
 
 	def clientFromID(self, user_id, fromdb=False):
 		return self._root.clientFromID(user_id, fromdb)
