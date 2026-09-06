@@ -15,6 +15,9 @@ xmlrpc.log*
 /server_motd.txt
 /server_turn.txt
 /server_verification_message.txt
+/turnserver.conf
+/turn_cert.pem
+/turn_pkey.pem
 /test.db
 /deps.zip
 /GeoIP.dat
