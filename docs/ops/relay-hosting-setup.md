@@ -159,7 +159,7 @@ turn:relay.example.org:3478
 
 Line 3 is optional and defaults to 43200 seconds. Do not go below 5115. The [`server_turn.txt` reference](../../README.md#server_turntxt---relay-hosting-turn) has that figure and where it comes from, and the server logs a warning at startup if you set less.
 
-Use `turns:` on port 5349 instead if you turned TLS on.
+Leave line 1 as `turn:` even if you gave coturn a certificate and a [TLS listener](../../README.md#tls-on-5349). No client speaks TURN over TLS yet, and coilbox refuses a `turns:` URI rather than quietly sending plain UDP at a TLS port, so naming one here is the single change that stops relay hosting working for every player while every other step still checks out. Your relay can keep listening on 5349 for whenever a client can use it. The server logs a warning at startup if line 1 names `turns:`.
 
 Under Compose the file has to be mounted into the container to be read at all, because the lobby reads it from its working directory and that is `/app` inside the container. `docker-compose.yml` has the line commented out next to the motd and agreement mounts. Uncomment it and put `server_turn.txt` next to `docker-compose.yml`.
 

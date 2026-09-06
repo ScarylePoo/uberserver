@@ -133,6 +133,36 @@ _, at_default = parse_and_capture([URI, SECRET])
 check(at_default == [], "the default lifetime should not warn, got %r" % (at_default,))
 
 
+# --- a turns: URI warns, and is still honoured -------------------------------------
+# Coilbox refuses a turns: relay in words, because its relay agent speaks plain UDP and
+# sending UDP at a TLS port would fail as a relay that never answers. Same shape as the
+# lifetime floor above: the operator hears about it, and the server still mints what it
+# was asked for, because another client may support TLS.
+TURNS_URI = "turns:relay.example.org:5349"
+
+turns_config, turns_warned = parse_and_capture([TURNS_URI, SECRET])
+check(turns_config[0] == TURNS_URI,
+      "a turns: URI should still be honoured, got %r" % (turns_config,))
+check(any("turns:" in w for w in turns_warned),
+      "a turns: URI should warn and name the scheme, got %r" % (turns_warned,))
+check(any("coilbox" in w.lower() for w in turns_warned),
+      "the warning should name the client that refuses it, got %r" % (turns_warned,))
+
+_, plain_warned = parse_and_capture([URI, SECRET])
+check(plain_warned == [],
+      "an ordinary turn: URI should not warn, got %r" % (plain_warned,))
+
+# a host that merely starts with those letters is not a turns: URI
+_, lookalike = parse_and_capture(["turn:turns.example.org:3478", SECRET])
+check(lookalike == [],
+      "a host called turns.* is not a turns: URI, got %r" % (lookalike,))
+
+# both problems at once should say both, not just the first
+_, both = parse_and_capture([TURNS_URI, SECRET, str(TURN_CLIENT_MIN_TTL - 1)])
+check(any("turns:" in w for w in both) and any(str(TURN_CLIENT_MIN_TTL) in w for w in both),
+      "a turns: URI and a short lifetime should both be reported, got %r" % (both,))
+
+
 # --- a successful request ----------------------------------------------------------
 root = FakeRoot()
 before = int(time.time())

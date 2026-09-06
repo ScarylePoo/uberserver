@@ -345,6 +345,13 @@ The relay recomputes the HMAC from a `static-auth-secret` it shares with the lob
 two processes never talk and neither holds session state. The secret is server configuration
 (`server_turn.txt`, see the README) and is never sent to a client.
 
+`uri` is `turn:host:port` as RFC 7065 writes it. A `turns:` URI, TURN over TLS, is reserved
+until a client supports one. The server does not refuse it, since its job is to hand out what
+the operator configured, but it warns at startup, and no client implements TLS today. A client
+that cannot use TLS should refuse a `turns:` URI in words rather than treat it as `turn:`,
+because sending plain UDP at a TLS port fails as a relay that never answers rather than as
+anything the person hosting could read.
+
 `ttl_seconds` is how long the credential stays valid, 43200 (12 hours) by default and set by
 the operator. It is sized against a whole game rather than battle setup. coturn judges the
 credential when it creates the session and checks later requests against the key it kept, so

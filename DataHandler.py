@@ -46,7 +46,7 @@ except:
 
 def parse_turn_config(lines):
 	# server_turn.txt:
-	#   line 1: TURN URI, e.g. turn:relay.example.org:3478 (or turns:...:5349 for TLS)
+	#   line 1: TURN URI, e.g. turn:relay.example.org:3478
 	#   line 2: static-auth-secret, shared with coturn's use-auth-secret
 	#   line 3: credential lifetime in seconds (optional)
 	# Raises ValueError with an operator-readable message on anything malformed. Half a
@@ -58,6 +58,12 @@ def parse_turn_config(lines):
 	uri, secret = lines[0], lines[1]
 	if any(c.isspace() for c in uri):
 		raise ValueError('the TURN URI on line 1 must not contain whitespace')
+	# A warning for the same reason the lifetime floor below is one. The server mints what
+	# the operator asked for, and a client other than coilbox may well speak TLS. But no
+	# client does today, and configuring this is the one way to break relay hosting for
+	# everybody while every other part of the setup looks correct.
+	if uri.startswith('turns:'):
+		logging.warning('server_turn.txt line 1 names a turns: URI. Coilbox speaks plain UDP and refuses a turns: relay in words, so relay hosting will not work for its players. Another client may support TLS. To serve TLS as well, leave line 1 as turn: and let coturn listen on 5349 for the clients that can use it. See the server_turn.txt section of the README.')
 	ttl = TURN_DEFAULT_TTL
 	if len(lines) > 2:
 		try:
