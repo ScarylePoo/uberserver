@@ -178,7 +178,7 @@ connection holds the listed level (higher levels inherit lower ones in practice 
 | **user — channel** | `CHANNELS`, `CHANNELTOPIC`, `JOIN`, `LEAVE`, `SAY`, `SAYEX`, `SAYPRIVATE`, `SAYPRIVATEEX`, `GETCHANNELMESSAGES` |
 | **user — account** | `GETUSERINFO`, `RENAMEACCOUNT`, `CHANGEPASSWORD`, `CHANGEEMAILREQUEST`, `CHANGEEMAIL`, `RESENDVERIFICATION` |
 | **user — social** | `IGNORE`, `UNIGNORE`, `IGNORELIST`, `FRIENDREQUEST`, `ACCEPTFRIENDREQUEST`, `DECLINEFRIENDREQUEST`, `UNFRIEND`, `FRIENDLIST`, `FRIENDREQUESTLIST` |
-| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON`, `TURNCREDENTIALS`, `RELAYEDHOST` |
+| **user — meta** | `MYSTATUS`, `PORTTEST`, `JSON`, `TURNCREDENTIALS`, `RELAYEDHOST`, `MOVERELAYEDHOST` |
 | **user — bridge** | `BRIDGECLIENTFROM`, `UNBRIDGECLIENTFROM`, `JOINFROM`, `LEAVEFROM`, `SAYFROM` |
 | **user — deprecated** | `MUTE`, `MUTELIST`, `SETCHANNELKEY`, `UNMUTE`, `SAYBATTLE`, `SAYBATTLEEX`, `SAYBATTLEPRIVATEEX`, `FORCELEAVECHANNEL`, `GETINGAMETIME` |
 | **mod** | `GETUSERID`, `GETIP`, `FINDIP`, `SETBOTMODE`, `CREATEBOTACCOUNT`, `RESETUSERPASSWORD`, `KICK`, `BAN`, `BANSPECIFIC`, `UNBAN`, `BLACKLIST`, `UNBLACKLIST`, `LISTBANS`, `LISTBLACKLIST` |
@@ -280,7 +280,7 @@ bots, script_tags, startrects, map/mod/engine, player/spectator limits.
 - Host force-commands: `FORCEALLYNO`, `FORCETEAMNO`, `FORCETEAMCOLOR`,
   `FORCESPECTATORMODE`, `HANDICAP`, `KICKFROMBATTLE`, `RING`.
 
-### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`, `RELAYEDHOST`)
+### 7.1 Relay hosting (`TURNCREDENTIALS`, `CLIENTIP`, `RELAYEDHOST`, `MOVERELAYEDHOST`)
 
 A player who cannot forward a port can host through a TURN relay instead. The relay
 allocation is an ordinary public address, so the battle is advertised in `BATTLEOPENED` and
@@ -389,10 +389,9 @@ exactly as it dials a direct one. There is nothing here for SpringLobby or Chobb
 and inventing a NAT mode would have cost every one of them a change.
 
 The `<port>` is in this line as well as in `OPENBATTLE`. `OPENBATTLE` is the one the battle is
-advertised at. This one is here because a rebuilt allocation moves the address and the port
-together, and saying so without reopening the battle needs both in one line. Updating a battle
-that is already open is not implemented, so today the server range-checks this port and then
-discards it. Send the real one anyway, because an out-of-range value is refused.
+advertised at, so the server range-checks this one and then discards it. Send the real one
+anyway, because an out-of-range value is refused. `MOVERELAYEDHOST` is the command whose port
+is used, because it has no `OPENBATTLE` behind it to carry one.
 
 All three of the address translations `BATTLEOPENED` normally does are skipped, including the
 one that hands a joiner the host's LAN address when the two share a WAN address. Two players
@@ -416,6 +415,88 @@ differ from the address it signals on, and resolving a name inside the command h
 stall the reactor.
 
 A client that sends no `RELAYEDHOST` sees a byte-for-byte unchanged battle.
+
+#### Moving an open battle (`MOVERELAYEDHOST`)
+
+A TURN allocation can be lost, and the replacement the host builds is on a different address
+and a different port. The battle is still open and the room is still full, but it is advertised
+at a pair nobody can reach. `MOVERELAYEDHOST` moves it without closing it, so the room and
+everybody in it stay where they are.
+
+```
+C> MOVERELAYEDHOST <ip> <port>
+S> BATTLEHOSTMOVED <battle_id> <ip> <port>
+S> MOVERELAYEDHOSTFAILED <reason>
+```
+
+Requires login, the `r` flag, and that the sender is the host of an open battle that was
+opened through a relay. Two plain fields, no tab sentence, and `<ip>` may be IPv4 or IPv6, as
+in `RELAYEDHOST`. There is no separate success reply: the host receives the same
+`BATTLEHOSTMOVED` everybody else does.
+
+This port is used, unlike `RELAYEDHOST`'s. There is no `OPENBATTLE` behind this line to carry
+one, and a rebuilt allocation moves the address and the port together, so a move that changed
+only the address would put the battle on the right machine at the wrong port and leave it
+exactly as unreachable as it was. From here on the battle is advertised at this pair, and the
+three address translations `BATTLEOPENED` normally does stay skipped.
+
+`natType` is untouched and stays `0`, for the reason it is `0` at `OPENBATTLE`: a TURN
+allocation is an ordinary public UDP address and a joining client needs to understand nothing
+about it.
+
+This is a separate command rather than a second `RELAYEDHOST` because "the sender is already
+hosting" does not tell the two cases apart. A relay host reopening its battle sends
+`RELAYEDHOST` while the old battle is still open, and the server reads that staged address
+before the `LEAVEBATTLE` which closes the old battle. One command would read that line as a
+move, apply it to a battle about to be destroyed, and advertise the new battle at the host's
+own unreachable machine.
+
+**What other clients see.** `BATTLEHOSTMOVED` goes to every logged-in client that sent `r` at
+login, including the host, and to nobody else. Anyone who joins or logs in after a move reads
+the new pair out of the ordinary `BATTLEOPENED` they are sent for the battle, so the message
+only has to reach clients that are already holding the old pair.
+
+A client that did not send `r` keeps the old address and port until it disconnects and receives
+the battle afresh. That is a stale list entry rather than a break, and it applies to people
+sitting in the room as much as to people looking at the list. There is nothing better available
+in this protocol:
+
+- no message changes a battle's address after `BATTLEOPENED`. `UPDATEBATTLEINFO` carries the
+  spectator count, the lock, the map and its hash, and no address
+- re-sending `BATTLEOPENED` for the same battle id does not work. SpringLobby asserts that the
+  battle does not already exist, throws, and logs a warning, so the line is dropped. Chobby
+  rebuilds its record of the battle from the new line and loses the user list with it
+- `HOSTPORT` is the closest existing message and still does not fit. It carries a port and no
+  address, and SpringLobby ignores it unless the battle's `natType` is one of the NAT-traversal
+  modes, which a relayed battle's never is
+- `BATTLECLOSED` followed by `BATTLEOPENED` would refresh the list for onlookers, at the price
+  of telling every bot, bridge and autohost on the server that a live battle closed, and firing
+  SpringLobby's "opened battle" notification on every relay rebuild. It cannot help the people
+  in the room either, because a client told that its own battle closed leaves it
+
+For the case this exists for, a stale entry costs that client nothing it had: the address it is
+still holding had already stopped working. A client that wants the correct one asks for `r` at
+login.
+
+**Battles that were never relayed are not moved.** A battle opened without a `RELAYEDHOST` is
+advertised at an address that works, and everyone holding it would be stranded there by a move
+nothing can tell them about. Converting it would break a working battle rather than repair a
+broken one, so a battle's addressing scheme is fixed for its lifetime.
+
+Failure cases, all reported as `MOVERELAYEDHOSTFAILED <reason>`, free text meant to be shown to
+whoever is trying to host:
+- the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
+- the client did not send `r` at login
+- the sender is not in a battle
+- the sender is in a battle but is not its host. A spectator must not be able to send everybody
+  in somebody else's battle to an address of its choosing
+- the battle was not opened through a relay
+- the address does not parse as an IP address at all
+- the address is not a public one, by the same check `RELAYEDHOST` applies
+- the port is not a whole number between 1 and 65535
+
+A refused move changes nothing and announces nothing, and a client that never sends
+`MOVERELAYEDHOST` sees a byte-for-byte unchanged battle.
 
 ---
 

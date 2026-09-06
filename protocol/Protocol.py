@@ -119,6 +119,7 @@ restricted = {
 	# relay hosting
 	'TURNCREDENTIALS',
 	'RELAYEDHOST',
+	'MOVERELAYEDHOST',
 	########
 	# bridge bots
 	'BRIDGECLIENTFROM',
@@ -766,6 +767,17 @@ class Protocol:
 	def broadcast_RemoveBattle(self, battle):
 		for cid, client in self._root.usernames.items():
 			client.Send('BATTLECLOSED %s' % battle.battle_id)
+
+	def broadcast_MoveBattle(self, battle):
+		'''sends the protocol for a battle that changed address without closing'''
+		# Gated on 'r' for the same reason CLIENTIP is. This is the only message in the
+		# protocol that changes a battle's address after BATTLEOPENED, so no client that
+		# predates relay hosting has a handler for it, and 'r' is exactly the flag that says
+		# "I understand relay-hosted battles". A client without it sees nothing new.
+		for cid, client in self._root.usernames.items():
+			if 'r' not in client.compat:
+				continue
+			client.Send('BATTLEHOSTMOVED %s %s %s' % (battle.battle_id, battle.relayed_ip, battle.port))
 
 	def broadcast_SendBattle(self, battle, data, sourceClient=None, flag=None, not_flag=None):
 		# the sourceClient is only sent for SAY*, and RING commands
@@ -3399,8 +3411,8 @@ class Protocol:
 
 		@required.str ip: The relay allocation's address, IPv4 or IPv6.
 		@required.int port: The relay allocation's port. The battle is advertised at the port
-		OPENBATTLE carries. This one is here because a rebuilt allocation moves the address
-		and the port together.
+		OPENBATTLE carries, so this one is range-checked and then discarded. MOVERELAYEDHOST
+		is the command whose port is used, because there is no OPENBATTLE behind it.
 		'''
 		if not self._root.turn_enabled():
 			client.Send('RELAYEDHOSTFAILED This server has no relay configured')
@@ -3428,6 +3440,86 @@ class Protocol:
 			return
 
 		client.relayed_host_ip = address
+
+	def in_MOVERELAYEDHOST(self, client, ip, port):
+		'''
+		Move the open battle this client is hosting to a new relay address and port.
+
+		Sent on its own, with no OPENBATTLE behind it, by a relay host whose TURN allocation
+		was lost and rebuilt somewhere else. The room and everybody in it stay where they are,
+		which is the whole point: closing and reopening the battle would empty it.
+
+		This is a separate command from RELAYEDHOST rather than the same one told apart by
+		whether the sender is already hosting, because that test does not tell them apart. A
+		relay host reopening its battle sends RELAYEDHOST while still hosting the old one, and
+		in_OPENBATTLE reads the staged address before the in_LEAVEBATTLE that closes it. One
+		command would read that RELAYEDHOST as a move, apply it to a battle about to be
+		destroyed, and leave the new battle advertised at the host's own unreachable machine.
+
+		The port here is used, unlike RELAYEDHOST's. There is no OPENBATTLE to carry one, and
+		a rebuilt allocation moves the address and the port together, so dropping it would
+		move the battle to the right address on the wrong port and leave it just as
+		unreachable as before.
+
+		A battle that was never relayed is refused. Everybody already in it, and every battle
+		list on the server, holds a direct address that still works, and there is no message
+		that can correct them, so converting it would break a working battle rather than
+		repair a broken one. A battle's addressing scheme is fixed for its lifetime.
+
+		natType is untouched, as at OPENBATTLE: a TURN allocation is an ordinary public UDP
+		address and a joining client needs to understand nothing.
+
+		On success, BATTLEHOSTMOVED <battle_id> <ip> <port> goes to every logged-in client
+		that asked for relay support, including the host. Refused as MOVERELAYEDHOSTFAILED
+		<reason>, free text meant to be read by whoever is trying to host.
+
+		@required.str ip: The rebuilt allocation's address, IPv4 or IPv6.
+		@required.int port: The rebuilt allocation's port. This is the port the battle is
+		advertised at from now on.
+		'''
+		if not self._root.turn_enabled():
+			client.Send('MOVERELAYEDHOSTFAILED This server has no relay configured')
+			return
+
+		if 'r' not in client.compat:
+			client.Send('MOVERELAYEDHOSTFAILED Your client did not ask for relay support at login')
+			return
+
+		battle = self.getCurrentBattle(client)
+		if not battle:
+			client.Send('MOVERELAYEDHOSTFAILED You are not hosting a battle')
+			return
+
+		# Explicit, and ahead of everything else about the battle: a spectator sitting in
+		# somebody else's battle must not be able to send everybody in it to an address of
+		# its choosing. canChangeSettings is the host test every other host-only command uses.
+		if not battle.canChangeSettings(client):
+			client.Send('MOVERELAYEDHOSTFAILED Only the host of a battle can move it')
+			return
+
+		if not battle.relayed_ip:
+			client.Send('MOVERELAYEDHOSTFAILED This battle was not opened through a relay')
+			return
+
+		try:
+			port = int(port)
+		except ValueError:
+			client.Send('MOVERELAYEDHOSTFAILED Port is not a number: %s' % port)
+			return
+		if port < 1 or port > 65535:
+			client.Send('MOVERELAYEDHOSTFAILED Port is out of range: 1-65535: %d' % port)
+			return
+
+		address, reason = self._validRelayedHostAddress(ip)
+		if not address:
+			client.Send('MOVERELAYEDHOSTFAILED %s' % reason)
+			return
+
+		battle.relayed_ip = address
+		battle.port = port
+		# Anybody who joins or logs in after this reads the new pair out of the battle, so
+		# BATTLEHOSTMOVED only has to reach the clients already holding the old one.
+		self.broadcast_MoveBattle(battle)
 
 	def in_KICK(self, client, username, reason=''):
 		# kick target username from server
