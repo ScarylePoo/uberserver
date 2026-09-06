@@ -19,10 +19,11 @@ _sys.path[:0] = [_ROOT, _os.path.join(_ROOT, "protocol"),
 import base64
 import hashlib
 import hmac
+import logging
 import sys
 import time
 
-from DataHandler import TURN_DEFAULT_TTL, parse_turn_config
+from DataHandler import TURN_CLIENT_MIN_TTL, TURN_DEFAULT_TTL, parse_turn_config
 from protocol import Protocol as ProtocolModule
 
 URI = "turn:relay.example.org:3478"
@@ -96,6 +97,40 @@ rejects(["turn:relay example.org:3478", SECRET], "URI containing a space")
 rejects([URI, SECRET, "twelve hours"], "non-numeric lifetime")
 rejects([URI, SECRET, "0"], "zero lifetime")
 rejects([URI, SECRET, "-1"], "negative lifetime")
+
+
+# --- a lifetime below what clients accept warns, and is still honoured --------------
+# Coilbox refuses a credential shorter than TURN_CLIENT_MIN_TTL, so the operator has to
+# hear about it. It stays a warning because another client may accept less.
+def parse_and_capture(lines):
+    captured = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    handler = Collect(level=logging.WARNING)
+    root_logger = logging.getLogger()
+    previous_level = root_logger.level
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.WARNING)
+    try:
+        return parse_turn_config(lines), captured
+    finally:
+        root_logger.removeHandler(handler)
+        root_logger.setLevel(previous_level)
+
+short_config, warned = parse_and_capture([URI, SECRET, str(TURN_CLIENT_MIN_TTL - 1)])
+check(short_config[2] == TURN_CLIENT_MIN_TTL - 1,
+      "a lifetime below the floor should still be honoured, got %r" % (short_config,))
+check(any(str(TURN_CLIENT_MIN_TTL) in w for w in warned),
+      "a lifetime below the floor should warn and name the floor, got %r" % (warned,))
+
+_, at_floor = parse_and_capture([URI, SECRET, str(TURN_CLIENT_MIN_TTL)])
+check(at_floor == [], "a lifetime at the floor should not warn, got %r" % (at_floor,))
+
+_, at_default = parse_and_capture([URI, SECRET])
+check(at_default == [], "the default lifetime should not warn, got %r" % (at_default,))
 
 
 # --- a successful request ----------------------------------------------------------

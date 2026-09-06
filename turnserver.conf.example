@@ -120,6 +120,19 @@ denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 # here needs them, and leaving them on is transit you are not using.
 no-tcp-relay
 
+# Do not add server-relay. This file leaves it out on purpose and it should stay
+# that way. The option stops coturn checking permissions at all, for every
+# allocation on the server, so anybody who can reach the relay can send through
+# any allocation on it.
+#
+# Somebody will reach for it eventually, and here is the reason they will. A
+# relayed player whose IP changes mid-game is cut off, because the permission
+# the host installed names the address that player has left, and there is no fix
+# available on the client side (tomjn/coilbox#2082). server-relay would be a fix,
+# since it drops the check that is failing. It is still not a trade worth making.
+# It weakens every allocation on the relay to work round something that affects
+# one player at a time.
+
 # ── TLS ───────────────────────────────────────────────────────────────────────
 #
 # TURN over TLS and DTLS, worth having for players whose network blocks plain

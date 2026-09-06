@@ -312,10 +312,13 @@ two processes never talk and neither holds session state. The secret is server c
 (`server_turn.txt`, see the README) and is never sent to a client.
 
 `ttl_seconds` is how long the credential stays valid, 43200 (12 hours) by default and set by
-the operator. It is sized against a whole game rather than battle setup: coturn re-checks the
-expiry on every refresh of a live allocation, and the relay outlives the lobby connection, so
-a credential that expires part way through ends the game rather than merely blocking new
-allocations.
+the operator. It is sized against a whole game rather than battle setup. coturn judges the
+credential when it creates the session and checks later requests against the key it kept, so
+an expiry passing under a live allocation costs nothing. What costs a game is expiry before
+the relay has to be rebuilt, because a rebuild opens a new session and a dead credential is
+refused. The relay outlives the lobby connection, so nothing can mint a replacement at that
+point. The server warns at startup if the configured lifetime is below what clients accept,
+which the README's `server_turn.txt` section sources and explains.
 
 Failure cases, all reported as `TURNCREDENTIALSFAILED <reason>`:
 - the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
