@@ -54,9 +54,14 @@ cannot drift. **[GAP]** the `@emits` convention does not exist yet — see
   or `!bset tweakunits`, which a logged-in client may send up to 16,384 characters. The
   limit is measured on the whole line, including the command name and any `#<id> ` prefix.
 
-**[GAP]** Confirm the byte-rate limits as seen by clients (the server enforces a
-per-access-level byte rate in `DataHandler.py` `flood_limits` and disconnects a client
-that goes over, so the rate clients should stay under is worth documenting).
+- **Byte rate.** A client over its byte rate is disconnected, having been told so first.
+  The rate is averaged over a window, both from `flood_limits`: 1,000 bytes per second
+  over 2 seconds before login, 2,000 over 10 seconds for `user`, `mod` and `admin`, and
+  50,000 over 10 seconds for a bot account. Tweak sets are the exception again. A whole
+  set is several 16k slots and no player could send one within their rate, so a logged-in
+  client has a separate allowance of 983,040 bytes per window for those two commands,
+  enough for the 60 slots Beyond All Reason declares. Bytes past the allowance count
+  against the byte rate like any others.
 
 ---
 
