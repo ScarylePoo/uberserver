@@ -148,6 +148,32 @@ check("message length limit" in chat_reply,
 check(PAYLOAD not in chat_at_host,
       "ordinary chat of the same size should not reach the host, got %d chars" % len(chat_at_host))
 
+# a whole set, sent as fast as the client can write it. Five slots is 80k, four times the
+# 20,000 bytes a user account may send in 10 seconds, so before the allowance existed this
+# disconnected the sender partway through.
+SLOTS = 5
+for n in range(1, SLOTS + 1):
+    tweaker.send("SAYBATTLE !bset tweakdefs%d %s" % (n, PAYLOAD))
+
+seen = ""
+deadline = time.time() + 15
+while time.time() < deadline:
+    seen += host.read_for(1.0)
+    if all(("!bset tweakdefs%d " % n) in seen for n in range(1, SLOTS + 1)):
+        break
+arrived = [n for n in range(1, SLOTS + 1) if ("!bset tweakdefs%d " % n) in seen]
+check(len(arrived) == SLOTS,
+      "the whole set should reach the host, slots that arrived: %s" % arrived)
+
+# and the sender is still there to send the next one
+try:
+    tweaker.send("PING")
+    alive = "PONG" in tweaker.read_until("PONG", 5)
+except OSError as e:
+    alive = False
+    print("PING after the set failed: %s" % e)
+check(alive, "the sender should not have been disconnected for flooding")
+
 for c in (chatter, tweaker, host):
     c.close()
 
