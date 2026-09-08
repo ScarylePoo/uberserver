@@ -2,6 +2,36 @@ import time, datetime, ip2country
 import logging
 
 
+# Spring and Recoil players change unit stats for one battle by sending SPADS a compiled
+# tweak set as chat, split over numbered slots: "!bset tweakdefs<n> <base64>". A slot is
+# 16000 base64 characters in the tooling players use today, far over any account's normal
+# message length, so those two commands get their own limit. Teiserver allows 16385 for the
+# same payload. The number here also has to cover the "SAYBATTLE " prefix, which teiserver's
+# equivalent check has already stripped.
+TWEAK_MSG_LENGTH = 16384
+TWEAK_COMMAND_PREFIXES = ('!bset tweakdefs', '!bset tweakunits')
+
+def command_length_limit(command, flood_limits, logged_in):
+	'the message length limit that applies to one raw command line'
+	limit = flood_limits['msglength']
+	if not logged_in:
+		return limit
+
+	# the line is still raw here: it may carry a "#<id> " message id, and the command
+	# name is whatever case the client sent it in
+	if command.startswith('#'):
+		msg_id, _, rest = command.partition(' ')
+		if msg_id[1:].isdigit():
+			command = rest
+
+	name, _, msg = command.partition(' ')
+	if name.upper() not in ('SAYBATTLE', 'SAYBATTLEEX'):
+		return limit
+	if not msg.lower().startswith(TWEAK_COMMAND_PREFIXES):
+		return limit
+	return max(limit, TWEAK_MSG_LENGTH)
+
+
 class Client():
 	'this object represents one server-side connected client'
 
@@ -193,8 +223,9 @@ class Client():
 			commands_buffer += strip_commands
 
 		for command in commands_buffer:
-			if len(command) > flood_limits['msglength']:
-				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (flood_limits['msglength'], command[0: 16]))
+			length_limit = command_length_limit(command, flood_limits, self.logged_in)
+			if len(command) > length_limit:
+				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (length_limit, command[0: 16]))
 				self.ReportFloodBreach("max message length (cmd=%s...)" % command[0: 16], len(command))
 				continue
 			self.HandleProtocolCommand(command)
@@ -254,4 +285,55 @@ class Client():
 		
 	def isHosting(self):
 		return self.current_battle and self._root.battles[self.current_battle].host == self.session_id
-		
+
+
+def selftest():
+	limits = {'msglength': 10000}
+	payload = 'A' * 16000
+
+	def limit_for(cmd, logged_in = True):
+		return command_length_limit(cmd, limits, logged_in)
+
+	# tweak commands get the raised limit, on both say paths and with a message id
+	assert(limit_for('SAYBATTLE !bset tweakunits1 ' + payload) == TWEAK_MSG_LENGTH)
+	assert(limit_for('SAYBATTLEEX !bset tweakdefs10 ' + payload) == TWEAK_MSG_LENGTH)
+	assert(limit_for('#42 SAYBATTLE !bset tweakdefs1 ' + payload) == TWEAK_MSG_LENGTH)
+	assert(limit_for('saybattle !bset TweakUnits1 ' + payload) == TWEAK_MSG_LENGTH)
+
+	# everything else stays on the account limit
+	assert(limit_for('SAYBATTLE hello') == limits['msglength'])
+	assert(limit_for('SAY #main !bset tweakdefs1 ' + payload) == limits['msglength'])
+	assert(limit_for('SAYPRIVATE host !bset tweakdefs1 ' + payload) == limits['msglength'])
+	assert(limit_for('SAYBATTLE !bset tweakdefs1 ' + payload, False) == limits['msglength'])
+
+	# the raise never lowers an account limit that is already higher
+	assert(command_length_limit('SAYBATTLE !bset tweakdefs1', {'msglength': 99999}, True) == 99999)
+
+	# and the length check in HandleProtocolCommands uses it
+	class FakeClient(Client):
+		def __init__(self):
+			self.data = ''
+			self.logged_in = True
+			self.handled = []
+			self.sent = []
+		def HandleProtocolCommand(self, cmd):
+			self.handled.append(cmd)
+		def Send(self, data, command = None):
+			self.sent.append(data)
+		def ReportFloodBreach(self, type, bytes):
+			pass
+
+	tweak = FakeClient()
+	tweak.HandleProtocolCommands(['SAYBATTLE !bset tweakunits1 ' + payload, ''], limits)
+	assert(len(tweak.handled) == 1)
+	assert(tweak.sent == [])
+
+	chat = FakeClient()
+	chat.HandleProtocolCommands(['SAYBATTLE ' + payload, ''], limits)
+	assert(chat.handled == [])
+	assert(len(chat.sent) == 1)
+
+	print("Client.py selftest passed")
+
+if __name__ == '__main__':
+	selftest()

@@ -32,6 +32,7 @@ jobs:
         run: |
           python protocol/Protocol.py
           python SQLUsers.py
+          python Client.py
       # NOTE: the pytest suite under tests/ (worker + e2e tiers, plus its conftest fixtures and a
       # MariaDB service) is committed and works, but is NOT gated here yet. Several tiers exercise
       # Phase-3 slices whose implementations live in other, not-yet-merged PRs, and the e2e tier
