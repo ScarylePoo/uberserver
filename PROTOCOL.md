@@ -47,9 +47,16 @@ cannot drift. **[GAP]** the `@emits` convention does not exist yet — see
 - **Connection cap:** the server refuses new connections above `maxclients`, derived
   from half the process file-descriptor limit (`twistedserver.py`).
 
-**[GAP]** Confirm maximum line length / flood limits as seen by clients (the server
-enforces per-access-level byte-rate and message-length limits in `DataHandler.py`
-`flood_limits`; document the values clients should stay under).
+- **Line length.** A command longer than the account's limit is dropped, and the sender
+  gets a `SERVERMSG` naming the limit. The limits are in `DataHandler.py` `flood_limits`:
+  1,000 characters before login, 10,000 for `user`, `bot`, `mod` and `admin`. The one
+  exception is a SPADS tweak set, `SAYBATTLE` or `SAYBATTLEEX` carrying `!bset tweakdefs`
+  or `!bset tweakunits`, which a logged-in client may send up to 16,384 characters. The
+  limit is measured on the whole line, including the command name and any `#<id> ` prefix.
+
+**[GAP]** Confirm the byte-rate limits as seen by clients (the server enforces a
+per-access-level byte rate in `DataHandler.py` `flood_limits` and disconnects a client
+that goes over, so the rate clients should stay under is worth documenting).
 
 ---
 
