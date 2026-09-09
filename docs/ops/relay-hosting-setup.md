@@ -17,11 +17,13 @@ The expected output quoted in this runbook came from running the commands agains
 
 ### 1. Decide where the relay runs
 
-Two options. On the lobby machine, or on its own host. The table in [Same machine, or its own?](../../README.md#same-machine-or-its-own) has the tradeoff. The short version is that sharing is cheaper and fine to start with, and splitting later costs one line of lobby config, which is step 12.
+Three options. On the lobby machine, on another machine on the same LAN behind the same router, or on its own host somewhere else. The table in [Same machine, or its own?](../../README.md#same-machine-or-its-own) has the tradeoff. The short version is that sharing is cheaper and fine to start with, a second box on the same LAN gets you most of the isolation for free, and moving out later costs one or two lines of lobby config, which is step 12.
+
+The first two both put the relay behind the lobby's own NAT, and the lobby has to be told, because the relay's public address is then the lobby's own and the lobby refuses that from a relay host unless it knows why. That is line 4 of `server_turn.txt` in step 9, and it is the difference between a relay that works and one where every `RELAYEDHOST` is refused as "this lobby server, not a relay" while every other check passes. Note now which case you are in.
 
 If you are choosing between locations for a separate host, put it near the players rather than near yourself. [Where you put it decides the latency players pay](../../README.md#where-you-put-it-decides-the-latency-players-pay).
 
-Check: you can name the machine, and you have a shell on it.
+Check: you can name the machine, you have a shell on it, and you know whether it shares the lobby's NAT.
 
 ### 2. Decide the address players will reach it at
 
@@ -33,7 +35,7 @@ The lobby refuses to advertise a battle at a private address, and a relay nobody
 dig +short relay.example.org
 ```
 
-Check: the name resolves to the public address you expect. If the machine is behind NAT, note both addresses now, because coturn needs the pair.
+Check: the name resolves to the public address you expect. If the machine is behind NAT, note both addresses now, because coturn needs the pair and, if it is the lobby's NAT, so does line 4 of `server_turn.txt`.
 
 ### 3. Size it
 
@@ -72,6 +74,8 @@ Copy the file before starting anything, because Docker creates a directory where
 
 Set `static-auth-secret` to the string from step 4, put the six numbers from step 3 in, and set `realm` and `external-ip` from step 2. Every value in the template that is a deployment choice is tagged `EXAMPLE`, and the comment above it says what the choice is. Do not ship the example numbers.
 
+If the relay shares the lobby's NAT and you want players on that LAN to be able to join relayed battles, uncomment the `allowed-peer-ip` line under Peers and set it to your LAN's range. Without it coturn refuses to forward to them, whatever the lobby tells them. Leave it commented for a relay anywhere else. [Quotas are the only thing between this and free transit](../../README.md#quotas-are-the-only-thing-between-this-and-free-transit) has what the line exposes.
+
 TLS on 5349 is worth having later for players whose network blocks plain UDP, and it needs a certificate from a CA their clients already trust. Leave it commented out for now and add it once the plain path works. [TLS on 5349](../../README.md#tls-on-5349) covers what it needs.
 
 Check: no line in the file still says `EXAMPLE` above a value you have not thought about, and `static-auth-secret` is not `REPLACE_ME_BEFORE_USE`.
@@ -86,7 +90,9 @@ sudo ufw allow 49152:49401/udp   # must match min-port..max-port in turnserver.c
 
 The third line opens a range, which is a much bigger hole than the single port the lobby already has open. Size it deliberately. [Ports and firewall](../../README.md#ports-and-firewall) covers this, including the cloud provider firewall you also have to open if you are on a VPS.
 
-Check: the range in the firewall rule is the same range as `min-port`..`max-port` in the config. Step 8 tells you if it is not.
+If the relay is behind a router, the same three openings have to be forwarded through it to the relay machine, each to the same port number it arrived on. coturn puts the port it is bound to into the address it hands out, so a forward that changes the port number hands out an address nobody can reach. A range forward is a single rule on most routers, including UniFi.
+
+Check: the range in the firewall rule is the same range as `min-port`..`max-port` in the config, and the same range again in any router forward. Step 8 tells you if it is not.
 
 ### 7. Start coturn
 
@@ -159,6 +165,17 @@ turn:relay.example.org:3478
 
 Line 3 is optional and defaults to 43200 seconds. Do not go below 5115. The [`server_turn.txt` reference](../../README.md#server_turntxt---relay-hosting-turn) has that figure and where it comes from, and the server logs a warning at startup if you set less.
 
+If you decided in step 1 that the relay shares the lobby's NAT, there is a fourth line, the relay machine's LAN address from step 2:
+
+```
+turn:relay.example.org:3478
+<the secret from step 4>
+43200
+10.42.42.20
+```
+
+Line 4 is what lets the lobby accept its own public address from a relay host, and what sends players on your LAN to the relay's LAN socket instead of out through the router and back. Leave it out for a relay anywhere else. Line 3 has to be written for line 4 to be read.
+
 Leave line 1 as `turn:` even if you gave coturn a certificate and a [TLS listener](../../README.md#tls-on-5349). No client speaks TURN over TLS yet, and coilbox refuses a `turns:` URI rather than quietly sending plain UDP at a TLS port, so naming one here is the single change that stops relay hosting working for every player while every other step still checks out. Your relay can keep listening on 5349 for whenever a client can use it. The server logs a warning at startup if line 1 names `turns:`.
 
 Under Compose the file has to be mounted into the container to be read at all, because the lobby reads it from its working directory and that is `/app` inside the container. `docker-compose.yml` has the line commented out next to the motd and agreement mounts. Uncomment it and put `server_turn.txt` next to `docker-compose.yml`.
@@ -184,10 +201,11 @@ SHA2-256(stdin)= 3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f
 
 Then restart the lobby. Under Compose, use `docker compose up -d uberserver` rather than `restart`, because you have just changed `docker-compose.yml` and a restart reuses the old container without the new mount. Either way the relay is left alone, so any relayed games already running survive it.
 
-Check: the lobby log has the line naming your URI.
+Check: the lobby log has the line naming your URI, and, if you set line 4, the LAN address.
 
 ```
 INFO  DataHandler.parseFiles  Relay hosting enabled: TURN turn:relay.example.org:3478, credential lifetime 43200s
+INFO  DataHandler.parseFiles  Relay hosting enabled: TURN turn:relay.example.org:3478, credential lifetime 43200s, relay is behind this NAT at 10.42.42.20
 ```
 
 `No server_turn.txt found, relay hosting is disabled.` means the file is not where the lobby is looking. `Could not load server_turn.txt, relay hosting is disabled:` means it found it and the contents are wrong, and the rest of the line says how.
@@ -226,7 +244,7 @@ Check: somebody on a supporting client can open a battle that other people can j
 The lobby never connects to the relay, so this is smaller than it sounds. [The lobby does not care where the relay runs](../../README.md#the-lobby-does-not-care-where-the-relay-runs).
 
 1. Build the new relay and prove it, steps 5 to 8, with the same secret from step 4. Nothing in this repository has to be on that machine, just `turnserver.conf`.
-2. Change line 1 of `server_turn.txt` to the new address. Leave lines 2 and 3 alone.
+2. Change line 1 of `server_turn.txt` to the new address. Leave lines 2 and 3 alone. If the new machine is outside the lobby's NAT and you had a line 4, remove it; if it is another box on the same LAN, change line 4 to its address.
 3. Restart the lobby, and repeat step 10 to confirm it still advertises `r`.
 
 The one thing to time properly is stopping the old relay. A relayed battle outlives the lobby connection that started it, so games are still running on the old relay after the lobby has stopped sending anyone to it. Leave it up until they finish.
@@ -234,5 +252,7 @@ The one thing to time properly is stopping the old relay. A relayed battle outli
 ### When it does not work
 
 The README has a triage table that tells the relay, the credential and the firewall apart from what you can see. [Telling the relay, the credential and the firewall apart](../../README.md#telling-the-relay-the-credential-and-the-firewall-apart).
+
+One failure the table does not cover, because it is invisible to every check above: the relay is behind the lobby's NAT and `server_turn.txt` has no line 4. `turnutils_uclient` passes, `r` is advertised, and every `RELAYEDHOST` is refused with "is this lobby server, not a relay", which the host's client shows. Step 9 has the fix.
 
 If every check in this runbook passes and battles still fail, it is not the relay and not the lobby config. Start from the client.

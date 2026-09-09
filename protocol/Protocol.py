@@ -650,10 +650,15 @@ class Protocol:
 
 		# The lobby's own address is a public one, and branch 2 of client_AddBattle already
 		# hands it out for port-forwarded hosts. A client naming it for itself would take
-		# that over, so it is refused however the operator has the lobby addressed.
+		# that over, so it is refused however the operator has the lobby addressed, with one
+		# exception: when the relay is behind the lobby's own NAT (line 4 of server_turn.txt)
+		# the lobby's public address is exactly where coturn's external-ip puts every
+		# allocation, and refusing it would refuse every relayed battle on that deployment.
 		for own in (self._root.online_ip, self._root.local_ip):
 			try:
 				if own and ipaddress.ip_address(own) == address:
+					if self._root.turn_lan_ip and own == self._root.online_ip:
+						break
 					return None, '%s is this lobby server, not a relay' % ip
 			except ValueError:
 				continue
@@ -797,7 +802,7 @@ class Protocol:
 		for cid, client in self._root.usernames.items():
 			if 'r' not in client.compat:
 				continue
-			client.Send('BATTLEHOSTMOVED %s %s %s' % (battle.battle_id, battle.relayed_ip, battle.port))
+			client.Send('BATTLEHOSTMOVED %s %s %s' % (battle.battle_id, self.relayedAddressFor(client, battle), battle.port))
 
 	def broadcast_SendBattle(self, battle, data, sourceClient=None, flag=None, not_flag=None):
 		# the sourceClient is only sent for SAY*, and RING commands
@@ -847,6 +852,43 @@ class Protocol:
 		assert(len(user.username) > 0)
 		client.Send('REMOVEUSER %s' % user.username)
 
+	def _isPrivateIP(self, ip):
+		if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('127.'):
+			return True
+		# 172.16.0.0 - 172.31.255.255 are private, but 172.32+ are public (e.g. T-Mobile)
+		if ip.startswith('172.'):
+			try:
+				second_octet = int(ip.split('.')[1])
+				return 16 <= second_octet <= 31
+			except:
+				return False
+		return False
+
+	def relayedAddressFor(self, client, battle):
+		'''The address to tell this client a relayed battle lives at.
+
+		Normally that is battle.relayed_ip, the public address coturn handed the host from
+		its external-ip. The exception is a joiner on the lobby's own LAN when the relay is
+		behind the lobby's own NAT, which is what line 4 of server_turn.txt declares. That
+		joiner cannot use the public address: the router would have to hairpin the packet
+		back in, and a router that does so rewrites the source, so the address coturn sees
+		no longer matches the CLIENTIP the host installed a permission for. Sending them the
+		relay's LAN address instead puts them straight on coturn's LAN socket with the same
+		source address the lobby reported in CLIENTIP. coturn must also be allowed to relay
+		to that LAN (allowed-peer-ip in turnserver.conf); see the relay hosting runbook.
+
+		"On the lobby's LAN" is judged the same way client_AddBattle judges it for direct
+		battles: the connection comes from a private address. Only a battle actually sitting
+		at the lobby's public address is translated, so a relay elsewhere is left alone.
+		'''
+		relayed_ip = battle.relayed_ip
+		lan_ip = self._root.turn_lan_ip
+		if (relayed_ip and lan_ip
+				and relayed_ip == self._root.online_ip
+				and self._isPrivateIP(client.ip_address)):
+			return lan_ip
+		return relayed_ip
+
 	def client_AddBattle(self, client, battle):
 		'sends the protocol for adding a battle'
 
@@ -862,17 +904,7 @@ class Protocol:
 		#    This fixes dedicated hosts on the same LAN as the lobby server being unreachable
 		#    from external clients. (Feature not in original uberserver - added for LAN hosting)
 		# 3. Otherwise send the host's WAN IP as reported.
-		def _is_private_ip(ip):
-			if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('127.'):
-				return True
-			# 172.16.0.0 - 172.31.255.255 are private, but 172.32+ are public (e.g. T-Mobile)
-			if ip.startswith('172.'):
-				try:
-					second_octet = int(ip.split('.')[1])
-					return 16 <= second_octet <= 31
-				except:
-					return False
-			return False
+		_is_private_ip = self._isPrivateIP
 
 		if battle.relayed_ip:
 			# A relayed battle lives at a TURN allocation on the relay, a public address on a
@@ -881,7 +913,9 @@ class Protocol:
 			# a relay is the address nobody can reach. The same-WAN-IP branch included: two
 			# players behind one NAT still reach a relayed battle through the relay rather than
 			# across their own LAN, so there is no recipient this is worth skipping for.
-			translated_ip = battle.relayed_ip
+			# The one substitution that is made is for a joiner on the lobby's own LAN when the
+			# relay is behind the lobby's own NAT; see relayedAddressFor.
+			translated_ip = self.relayedAddressFor(client, battle)
 		elif host.ip_address == client.ip_address:
 			# Same WAN IP - both on same LAN, use host's local IP
 			translated_ip = host.local_ip
