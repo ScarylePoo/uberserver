@@ -198,12 +198,17 @@ class DataHandler:
 		self.recent_registrations = {} #ip_address->int
 		self.recent_renames = {} #user_id->int
 		self.recent_turn_credentials = {} #user_id->int
+		# tweakbytes is how much of a window's traffic may be SPADS tweak sets, which are far
+		# over the byte rate and would otherwise disconnect the player sending one. Beyond All
+		# Reason declares 60 tweak slots (a bare tweakdefs and tweakunits plus 1..29 of each),
+		# so this is a whole set at the 16384 characters one slot is allowed, and no legitimate
+		# set has to be spread over several windows. Nothing before login gets an allowance.
 		self.flood_limits = {
-			'fresh':{'msglength':1000, 'bytespersecond':1000, 'seconds':2}, # also the default
-			'user':{'msglength':10000, 'bytespersecond':2000, 'seconds':10},
-			'bot':{'msglength':10000, 'bytespersecond':50000, 'seconds':10},
-			'mod':{'msglength':10000, 'bytespersecond':2000, 'seconds':10},
-			'admin':{'msglength':10000, 'bytespersecond':2000, 'seconds':10},
+			'fresh':{'msglength':1000, 'bytespersecond':1000, 'seconds':2, 'tweakbytes':0}, # also the default
+			'user':{'msglength':10000, 'bytespersecond':2000, 'seconds':10, 'tweakbytes':983040},
+			'bot':{'msglength':10000, 'bytespersecond':50000, 'seconds':10, 'tweakbytes':983040},
+			'mod':{'msglength':10000, 'bytespersecond':2000, 'seconds':10, 'tweakbytes':983040},
+			'admin':{'msglength':10000, 'bytespersecond':2000, 'seconds':10, 'tweakbytes':983040},
 		}
 
 	def initlogger(self, filename):

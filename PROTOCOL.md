@@ -47,9 +47,21 @@ cannot drift. **[GAP]** the `@emits` convention does not exist yet — see
 - **Connection cap:** the server refuses new connections above `maxclients`, derived
   from half the process file-descriptor limit (`twistedserver.py`).
 
-**[GAP]** Confirm maximum line length / flood limits as seen by clients (the server
-enforces per-access-level byte-rate and message-length limits in `DataHandler.py`
-`flood_limits`; document the values clients should stay under).
+- **Line length.** A command longer than the account's limit is dropped, and the sender
+  gets a `SERVERMSG` naming the limit. The limits are in `DataHandler.py` `flood_limits`:
+  1,000 characters before login, 10,000 for `user`, `bot`, `mod` and `admin`. The one
+  exception is a SPADS tweak set, `SAYBATTLE` or `SAYBATTLEEX` carrying `!bset tweakdefs`
+  or `!bset tweakunits`, which a logged-in client may send up to 16,384 characters. The
+  limit is measured on the whole line, including the command name and any `#<id> ` prefix.
+
+- **Byte rate.** A client over its byte rate is disconnected, having been told so first.
+  The rate is averaged over a window, both from `flood_limits`: 1,000 bytes per second
+  over 2 seconds before login, 2,000 over 10 seconds for `user`, `mod` and `admin`, and
+  50,000 over 10 seconds for a bot account. Tweak sets are the exception again. A whole
+  set is several 16k slots and no player could send one within their rate, so a logged-in
+  client has a separate allowance of 983,040 bytes per window for those two commands,
+  enough for the 60 slots Beyond All Reason declares. Bytes past the allowance count
+  against the byte rate like any others.
 
 ---
 

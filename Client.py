@@ -2,6 +2,52 @@ import time, datetime, ip2country
 import logging
 
 
+# Spring and Recoil players change unit stats for one battle by sending SPADS a compiled
+# tweak set as chat, split over numbered slots: "!bset tweakdefs<n> <base64>". A slot is
+# 16000 base64 characters in the tooling players use today, far over any account's normal
+# message length, so those two commands get their own limit. Teiserver allows 16385 for the
+# same payload. The number here also has to cover the "SAYBATTLE " prefix, which teiserver's
+# equivalent check has already stripped.
+TWEAK_MSG_LENGTH = 16384
+TWEAK_COMMAND_PREFIXES = ('!bset tweakdefs', '!bset tweakunits')
+
+def is_tweak_command(command):
+	'whether one raw command line is a SPADS tweak set going to a battle'
+	# the line is still raw here: it may carry a "#<id> " message id, and the command
+	# name is whatever case the client sent it in
+	if command.startswith('#'):
+		msg_id, _, rest = command.partition(' ')
+		if msg_id[1:].isdigit():
+			command = rest
+
+	name, _, msg = command.partition(' ')
+	if name.upper() not in ('SAYBATTLE', 'SAYBATTLEEX'):
+		return False
+	return msg.lower().startswith(TWEAK_COMMAND_PREFIXES)
+
+def command_length_limit(command, flood_limits, logged_in):
+	'the message length limit that applies to one raw command line'
+	limit = flood_limits['msglength']
+	if not logged_in or not is_tweak_command(command):
+		return limit
+	return max(limit, TWEAK_MSG_LENGTH)
+
+def tweak_command_bytes(lines, logged_in):
+	'''
+	How many of a chunk's bytes belong to tweak commands, and so are charged to the
+	tweak allowance rather than to the byte rate.
+
+	A line over the tweak length limit is dropped later on and never reaches a battle, so
+	it earns no exemption. Without that, a flood only has to wear a tweak command's prefix
+	to escape the byte rate entirely.
+	'''
+	if not logged_in:
+		return 0
+	# each line was charged with the newline that ended it
+	return sum(len(line) + 1 for line in lines
+		if len(line) <= TWEAK_MSG_LENGTH and is_tweak_command(line))
+
+
 class Client():
 	'this object represents one server-side connected client'
 
@@ -58,6 +104,7 @@ class Client():
 		self.msg_sendbuffer = []
 		self.sendingmessage = ''
 		self.msg_length_history = {}
+		self.tweak_length_history = {} # the part of it spent on tweak sets, exempt from the byte rate
 
 		# channels
 		self.channels = set()
@@ -130,30 +177,37 @@ class Client():
 		bytespersecond = flood_limits['bytespersecond']
 		seconds = flood_limits['seconds']
 
+		# keep appending until we see at least one newline
+		self.data += data
+		split_data = self.data.split("\n")
+
 		if (now in self.msg_length_history):
 			self.msg_length_history[now] += len(data)
 		else:
 			self.msg_length_history[now] = len(data)
 
-		total = 0
+		total = self.sumFloodHistory(self.msg_length_history, now, seconds)
+		exempt = self.sumFloodHistory(self.tweak_length_history, now, seconds)
 
-		for iter in dict(self.msg_length_history):
-			if (iter < now - (seconds - 1)):
-				del self.msg_length_history[iter]
-			else:
-				total += self.msg_length_history[iter]
+		# A tweak set is several 16k slots sent back to back, which is over the byte rate of
+		# every account type, so a player sending one would be disconnected partway through.
+		# Those bytes are charged to a separate allowance instead. Once it is spent the rest
+		# is charged as ordinary traffic, so a flood wearing a tweak command's prefix still
+		# meets the same limit it always did. Only the lines this call completed are counted,
+		# and each of them only once.
+		spare = max(0, flood_limits['tweakbytes'] - exempt)
+		tweaked = min(spare, tweak_command_bytes(split_data[: len(split_data) - 1], self.logged_in))
+		self.tweak_length_history[now] = self.tweak_length_history.get(now, 0) + tweaked
+		exempt += tweaked
 
-		if total > (bytespersecond * seconds):
+		if (total - exempt) > (bytespersecond * seconds):
 			self.Send('SERVERMSG No flooding (over %s per second for %s seconds)' % (bytespersecond, seconds))
-			self.ReportFloodBreach("flood limit", total)
+			self.ReportFloodBreach("flood limit", total - exempt)
 			self.Remove('Kicked for flooding (%s)' % (self.access))
 			return
 
-		# keep appending until we see at least one newline
-		self.data += data
-
 		# if far too much data has accumulated without hitting flood limits and without a newline, just clear it
-		if (self.data.count('\n') == 0):
+		if (len(split_data) == 1):
 			if (len(self.data) > (flood_limits['msglength'])*16):
 				del self.data
 				self.data = ""
@@ -161,7 +215,17 @@ class Client():
 				self.ReportFloodBreach("max client data cache ", len(self.data))
 			return
 
-		self.HandleProtocolCommands(self.data.split("\n"), flood_limits)
+		self.HandleProtocolCommands(split_data, flood_limits)
+
+	def sumFloodHistory(self, history, now, seconds):
+		'total of one per-second byte history over the flood window, dropping what fell out of it'
+		total = 0
+		for iter in dict(history):
+			if (iter < now - (seconds - 1)):
+				del history[iter]
+			else:
+				total += history[iter]
+		return total
 
 	def HandleProtocolCommand(self, cmd):
 		# probably caused by trailing newline ("abc\n".split("\n") == ["abc", ""])
@@ -193,8 +257,9 @@ class Client():
 			commands_buffer += strip_commands
 
 		for command in commands_buffer:
-			if len(command) > flood_limits['msglength']:
-				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (flood_limits['msglength'], command[0: 16]))
+			length_limit = command_length_limit(command, flood_limits, self.logged_in)
+			if len(command) > length_limit:
+				self.Send('SERVERMSG message length limit of %i chars was exceeded: command \"%s...\" dropped.' % (length_limit, command[0: 16]))
 				self.ReportFloodBreach("max message length (cmd=%s...)" % command[0: 16], len(command))
 				continue
 			self.HandleProtocolCommand(command)
@@ -254,4 +319,124 @@ class Client():
 		
 	def isHosting(self):
 		return self.current_battle and self._root.battles[self.current_battle].host == self.session_id
-		
+
+
+def selftest():
+	limits = {'msglength': 10000}
+	payload = 'A' * 16000
+
+	def limit_for(cmd, logged_in = True):
+		return command_length_limit(cmd, limits, logged_in)
+
+	# tweak commands get the raised limit, on both say paths and with a message id
+	assert(limit_for('SAYBATTLE !bset tweakunits1 ' + payload) == TWEAK_MSG_LENGTH)
+	assert(limit_for('SAYBATTLEEX !bset tweakdefs10 ' + payload) == TWEAK_MSG_LENGTH)
+	assert(limit_for('#42 SAYBATTLE !bset tweakdefs1 ' + payload) == TWEAK_MSG_LENGTH)
+	assert(limit_for('saybattle !bset TweakUnits1 ' + payload) == TWEAK_MSG_LENGTH)
+
+	# everything else stays on the account limit
+	assert(limit_for('SAYBATTLE hello') == limits['msglength'])
+	assert(limit_for('SAY #main !bset tweakdefs1 ' + payload) == limits['msglength'])
+	assert(limit_for('SAYPRIVATE host !bset tweakdefs1 ' + payload) == limits['msglength'])
+	assert(limit_for('SAYBATTLE !bset tweakdefs1 ' + payload, False) == limits['msglength'])
+
+	# the raise never lowers an account limit that is already higher
+	assert(command_length_limit('SAYBATTLE !bset tweakdefs1', {'msglength': 99999}, True) == 99999)
+
+	# and the length check in HandleProtocolCommands uses it
+	class FakeClient(Client):
+		def __init__(self):
+			self.data = ''
+			self.logged_in = True
+			self.handled = []
+			self.sent = []
+		def HandleProtocolCommand(self, cmd):
+			self.handled.append(cmd)
+		def Send(self, data, command = None):
+			self.sent.append(data)
+		def ReportFloodBreach(self, type, bytes):
+			pass
+
+	tweak = FakeClient()
+	tweak.HandleProtocolCommands(['SAYBATTLE !bset tweakunits1 ' + payload, ''], limits)
+	assert(len(tweak.handled) == 1)
+	assert(tweak.sent == [])
+
+	chat = FakeClient()
+	chat.HandleProtocolCommands(['SAYBATTLE ' + payload, ''], limits)
+	assert(chat.handled == [])
+	assert(len(chat.sent) == 1)
+
+	# a whole tweak set is several slots sent back to back, far over a player's byte rate
+	rate = {'msglength': 10000, 'bytespersecond': 2000, 'seconds': 10,
+		'tweakbytes': 60 * TWEAK_MSG_LENGTH}
+
+	class FloodClient(Client):
+		def __init__(self, flood_limits, logged_in = True):
+			class FakeRoot:
+				pass
+			self._root = FakeRoot()
+			self._root.flood_limits = {'user': flood_limits, 'fresh': flood_limits}
+			self.bot = False
+			self.access = 'user'
+			self.logged_in = logged_in
+			self.data = ''
+			self.msg_length_history = {}
+			self.tweak_length_history = {}
+			self.handled = []
+			self.sent = []
+			self.removed = []
+		def HandleProtocolCommand(self, cmd):
+			self.handled.append(cmd)
+		def Send(self, data, command = None):
+			self.sent.append(data)
+		def ReportFloodBreach(self, type, bytes):
+			pass
+		def Remove(self, reason = 'Quit'):
+			self.removed.append(reason)
+
+	def slots(n):
+		return ["SAYBATTLE !bset tweakunits%d %s\n" % (i, payload) for i in range(1, n + 1)]
+
+	# five slots, one write each: all delivered, sender still connected
+	paced = FloodClient(rate)
+	for line in slots(5):
+		paced.Handle(line)
+	assert(len(paced.handled) == 5)
+	assert(paced.removed == [])
+
+	# and the same five arriving in one read, which is what a client blasting them looks like
+	coalesced = FloodClient(rate)
+	coalesced.Handle("".join(slots(5)))
+	assert(len(coalesced.handled) == 5)
+	assert(coalesced.removed == [])
+
+	# the byte rate is untouched for everything else: the same volume of ordinary chat
+	# still disconnects the sender
+	flooder = FloodClient(rate)
+	for _ in range(5):
+		flooder.Handle("SAYBATTLE %s\n" % payload)
+	assert(flooder.removed != [])
+
+	# past the allowance, tweak bytes are charged like any others
+	stingy = FloodClient(dict(rate, tweakbytes = 2 * TWEAK_MSG_LENGTH))
+	for line in slots(5):
+		stingy.Handle(line)
+	assert(stingy.removed != [])
+
+	# a line too long to be delivered anyway buys no exemption
+	overlong = FloodClient(rate)
+	for _ in range(5):
+		overlong.Handle("SAYBATTLE !bset tweakunits1 %s\n" % ('A' * TWEAK_MSG_LENGTH))
+	assert(overlong.removed != [])
+
+	# and neither does a tweak command from a client that has not logged in
+	anon = FloodClient(rate, logged_in = False)
+	for line in slots(5):
+		anon.Handle(line)
+	assert(anon.removed != [])
+
+	print("Client.py selftest passed")
+
+if __name__ == '__main__':
+	selftest()
