@@ -11,6 +11,7 @@ import datetime
 from protocol import Protocol, Channel, Battle
 
 
+import ipaddress
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from twisted.internet import ssl
@@ -49,6 +50,9 @@ def parse_turn_config(lines):
 	#   line 1: TURN URI, e.g. turn:relay.example.org:3478
 	#   line 2: static-auth-secret, shared with coturn's use-auth-secret
 	#   line 3: credential lifetime in seconds (optional)
+	#   line 4: the relay's LAN address, only when the relay sits behind the same NAT as
+	#           the lobby (optional, needs line 3 present)
+	# Returns (uri, secret, ttl, lan_ip), lan_ip None when line 4 is absent.
 	# Raises ValueError with an operator-readable message on anything malformed. Half a
 	# config is worse than none: a bad lifetime expires credentials mid-game, and a URI
 	# containing a space produces a reply the client silently drops.
@@ -76,7 +80,23 @@ def parse_turn_config(lines):
 	# for, and a client other than coilbox may well accept less.
 	if ttl < TURN_CLIENT_MIN_TTL:
 		logging.warning('server_turn.txt line 3 sets a credential lifetime of %ds, below the %ds coilbox requires. Coilbox will refuse to open a relayed battle on a credential this short, so relay hosting will not work for its players. Another client may accept less. See the server_turn.txt section of the README.' % (ttl, TURN_CLIENT_MIN_TTL))
-	return uri, secret, ttl
+	# Line 4 is the relay's own LAN address, and it means the relay shares the lobby's NAT.
+	# Two things follow from that (see Protocol._validRelayedHostAddress and
+	# Protocol.relayedAddressFor): the lobby's own public address is accepted from a relay
+	# host, because that is where coturn's external-ip puts every allocation; and joiners
+	# on the lobby's own LAN are told this address instead, because the public one would
+	# have to be hairpinned back in through the router, which rewrites the source and
+	# breaks the permission the host installed for them.
+	lan_ip = None
+	if len(lines) > 3:
+		try:
+			parsed = ipaddress.ip_address(lines[3])
+		except ValueError:
+			raise ValueError('the relay LAN address on line 4 must be an IP address, found %r' % lines[3])
+		if not parsed.is_private or parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+			raise ValueError('the relay LAN address on line 4 must be a private (RFC 1918 or unique-local) address, found %r. Leave line 4 out unless the relay is behind the same NAT as the lobby.' % lines[3])
+		lan_ip = str(parsed)
+	return uri, secret, ttl, lan_ip
 
 class DataHandler:
 
@@ -109,6 +129,7 @@ class DataHandler:
 		self.mail_smtp_pass = None
 		self.turn_uri = None
 		self.turn_secret = None
+		self.turn_lan_ip = None
 		self.turn_ttl = TURN_DEFAULT_TTL
 		self.trusted_proxies = set([])		
 		
@@ -606,12 +627,16 @@ class DataHandler:
 		self.turn_uri = None
 		self.turn_secret = None
 		self.turn_ttl = TURN_DEFAULT_TTL
+		self.turn_lan_ip = None
 		try:
 			with open('server_turn.txt', 'r') as f:
 				file_lines = [l.strip() for l in f.readlines()]
-			self.turn_uri, self.turn_secret, self.turn_ttl = parse_turn_config(file_lines)
+			self.turn_uri, self.turn_secret, self.turn_ttl, self.turn_lan_ip = parse_turn_config(file_lines)
 			# never log the secret
-			logging.info('Relay hosting enabled: TURN %s, credential lifetime %ds' % (self.turn_uri, self.turn_ttl))
+			if self.turn_lan_ip:
+				logging.info('Relay hosting enabled: TURN %s, credential lifetime %ds, relay is behind this NAT at %s' % (self.turn_uri, self.turn_ttl, self.turn_lan_ip))
+			else:
+				logging.info('Relay hosting enabled: TURN %s, credential lifetime %ds' % (self.turn_uri, self.turn_ttl))
 		except FileNotFoundError:
 			logging.info('No server_turn.txt found, relay hosting is disabled.')
 		except Exception as e:

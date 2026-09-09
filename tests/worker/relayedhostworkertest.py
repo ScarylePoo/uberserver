@@ -26,6 +26,11 @@ RELAY_V4 = "185.199.108.153"
 RELAY_V6 = "2606:4700:4700::1111"
 LOBBY_IP = "192.0.2.1"        # only ever compared against, never advertised
 LOBBY_LAN = "10.0.0.2"
+# A lobby with a real public address, for the cases where the relay is behind its NAT and
+# so lives at that address. LOBBY_IP above is a documentation address, refused before the
+# own-address check is ever reached.
+LOBBY_PUBLIC = "104.16.132.229"
+RELAY_LAN = "10.42.42.20"       # line 4 of server_turn.txt: the relay behind the lobby's NAT
 HOST_WAN = "81.2.69.142"
 HOST_LAN = "192.168.1.10"
 OUTSIDER = "31.13.72.36"
@@ -49,10 +54,11 @@ class FakeSayHooks:
 
 
 class FakeRoot:
-    def __init__(self, relay=True):
+    def __init__(self, relay=True, lan_ip=None, online_ip=LOBBY_IP):
         self.turn_uri = "turn:relay.example.org:3478" if relay else None
         self.turn_secret = "a_long_random_string" if relay else None
-        self.online_ip = LOBBY_IP
+        self.turn_lan_ip = lan_ip  # line 4 of server_turn.txt: relay behind the lobby's NAT
+        self.online_ip = online_ip
         self.local_ip = LOBBY_LAN
         self.trusted_proxies = set()
         self.channels = {}
@@ -202,6 +208,26 @@ check(reply.startswith("RELAYEDHOSTFAILED "),
 check(noflag.relayed_host_ip is None,
       "a refused client should hold no address, got %r" % (noflag.relayed_host_ip,))
 
+# --- a relay behind the lobby's own NAT lives at the lobby's public address ---------
+# coturn's external-ip is the NAT's public address, which is the lobby's online_ip, so with
+# line 4 of server_turn.txt set that one own-address refusal has to lift. The LAN one stays.
+nat_root = FakeRoot(lan_ip=RELAY_LAN, online_ip=LOBBY_PUBLIC)
+nat_host = FakeClient(nat_root, "nathost", compat=("u", "sp", "r"))
+reply = relayedhost(nat_root, nat_host, LOBBY_PUBLIC)
+check(reply == "",
+      "with the relay behind this NAT the lobby's own public address should be accepted, got %r" % (reply,))
+check(nat_host.relayed_host_ip == LOBBY_PUBLIC,
+      "the accepted address should be held for OPENBATTLE, got %r" % (nat_host.relayed_host_ip,))
+nat_lan = FakeClient(nat_root, "natlanhost", compat=("u", "sp", "r"))
+reply = relayedhost(nat_root, nat_lan, LOBBY_LAN)
+check(reply.startswith("RELAYEDHOSTFAILED "),
+      "line 4 must not open the door to the lobby's LAN address, got %r" % (reply,))
+plain_root = FakeRoot(online_ip=LOBBY_PUBLIC)
+plain_host = FakeClient(plain_root, "plainhost", compat=("u", "sp", "r"))
+reply = relayedhost(plain_root, plain_host, LOBBY_PUBLIC)
+check(reply.startswith("RELAYEDHOSTFAILED "),
+      "without line 4 the lobby's own public address is still refused, got %r" % (reply,))
+
 # and neither has anybody, on a server with no relay to be hosted through
 norelay_root = FakeRoot(relay=False)
 norelay_host = FakeClient(norelay_root, "norelayhost", compat=("u", "sp", "r"))
@@ -246,6 +272,36 @@ check(battle_address(lan_relayed["outsider"]) == RELAY_V4,
       "a private-looking relay host should still advertise the relay, got %r" % (lan_relayed["outsider"],))
 check(battle_address(lan_direct["outsider"]) == LOBBY_IP,
       "without a relay a private-looking host is still advertised at the lobby, got %r" % (lan_direct["outsider"],))
+
+# --- a joiner on the lobby's LAN is told the relay's LAN address, nobody else is ----
+# With line 4 set, a battle sitting at the lobby's public address is on this NAT. A joiner
+# whose connection is from a private address is on the same LAN and would have to hairpin
+# to reach the public one, so they get line 4 instead; everybody outside gets the public
+# address as before. A battle at any other relay is translated for nobody.
+def hosted_behind_nat(relay_ip):
+    FakeClient._next_session = 1
+    root = FakeRoot(lan_ip=RELAY_LAN, online_ip=LOBBY_PUBLIC)
+    host = FakeClient(root, "host", compat=("u", "sp", "r"))
+    FakeClient(root, "lanjoiner", compat=("u", "sp", "r"), ip="10.42.43.7", local_ip="10.42.43.7")
+    FakeClient(root, "lanjoiner_plain", ip="10.42.43.8", local_ip="10.42.43.8")
+    FakeClient(root, "outsider", ip=OUTSIDER)
+    FakeClient(root, "samewan", ip=HOST_WAN, local_ip="192.168.1.11")
+    relayedhost(root, host, relay_ip)
+    openbattle(root, host)
+    return {name: advertised(client) for name, client in root.usernames.items()}
+
+behind_nat = hosted_behind_nat(LOBBY_PUBLIC)
+for who in ("lanjoiner", "lanjoiner_plain"):
+    check(battle_address(behind_nat[who]) == RELAY_LAN,
+          "%s on the lobby's LAN should be told the relay's LAN address, got %r" % (who, behind_nat[who]))
+for who in ("host", "outsider", "samewan"):
+    check(battle_address(behind_nat[who]) == LOBBY_PUBLIC,
+          "%s should be told the relay's public address, got %r" % (who, behind_nat[who]))
+
+elsewhere = hosted_behind_nat(RELAY_V4)
+for who in ("lanjoiner", "lanjoiner_plain", "host", "outsider", "samewan"):
+    check(battle_address(elsewhere[who]) == RELAY_V4,
+          "a battle at some other relay should be untouched for %s, got %r" % (who, elsewhere[who]))
 
 # natType is the whole reason this needs no client support
 for who, line in relayed.items():

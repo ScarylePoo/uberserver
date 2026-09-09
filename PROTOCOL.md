@@ -468,6 +468,14 @@ one that hands a joiner the host's LAN address when the two share a WAN address.
 behind one NAT reach a relayed battle through the relay rather than across their own LAN, so
 every recipient is told the same relay address.
 
+The one substitution that is made is an operator's, not the host's. When the relay is behind
+the lobby server's own NAT, the operator names its LAN address on line 4 of `server_turn.txt`,
+and a recipient whose lobby connection comes from a private address is on that same LAN. Such a
+recipient is told the line 4 address, in `BATTLEOPENED` and in `BATTLEHOSTMOVED`, for a battle
+whose relay address is the lobby's own public one. Everybody else is told the public address.
+The joiner's `CLIENTIP` to the host is unaffected, so the permission the host installs still
+names the address coturn will see the packets from. Without line 4 nothing is substituted.
+
 Failure cases, all reported as `RELAYEDHOSTFAILED <reason>`, free text meant to be shown to
 whoever is trying to host:
 - the server has no relay configured, in which case `r` is also absent from `COMPFLAGS`
@@ -476,7 +484,10 @@ whoever is trying to host:
 - the address does not parse as an IP address at all
 - the address is not a public one: loopback, any private or link-local range, carrier-grade
   NAT, multicast, the documentation ranges, or the lobby server's own address. Both families
-  are covered by the same check
+  are covered by the same check. The lobby's own public address is the one exception, and only
+  when line 4 of `server_turn.txt` declares the relay to be behind the lobby's NAT, because
+  coturn's `external-ip` is then that address and there is nowhere else a relayed battle there
+  could live. The lobby's own LAN address is refused regardless
 - the port is not a whole number between 1 and 65535
 
 The server does not check that the address belongs to the relay it minted a credential for.

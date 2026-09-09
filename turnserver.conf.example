@@ -116,6 +116,14 @@ denied-peer-ip=100.64.0.0-100.127.255.255
 denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
+# EXAMPLE. The one hole worth opening in the list above: players on the lobby's own
+# LAN, when this relay is behind the lobby's NAT. The lobby sends them to this
+# machine's LAN address (line 4 of server_turn.txt) and coturn has to be allowed to
+# forward to them. allowed-peer-ip wins over denied-peer-ip, so this one line is
+# enough; leave the deny list as it is. Keep it to the players' subnet: anybody with
+# an allocation can then have packets forwarded to any address in it.
+#allowed-peer-ip=10.42.42.0-10.42.43.255
+
 # TCP relay endpoints (RFC 6062) are on by default. A battle is UDP, so nothing
 # here needs them, and leaving them on is transit you are not using.
 no-tcp-relay

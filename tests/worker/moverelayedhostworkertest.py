@@ -36,6 +36,8 @@ MOVED_V4 = "151.101.1.140"
 MOVED_V6 = "2606:4700:4700::1111"
 LOBBY_IP = "192.0.2.1"
 LOBBY_LAN = "10.0.0.2"
+LOBBY_PUBLIC = "104.16.132.229"  # a real public lobby address, for the relay-behind-NAT case
+RELAY_LAN = "10.42.42.20"        # line 4 of server_turn.txt
 HOST_WAN = "81.2.69.142"
 HOST_LAN = "192.168.1.10"
 OUTSIDER = "31.13.72.36"
@@ -62,10 +64,11 @@ class FakeSayHooks:
 
 
 class FakeRoot:
-    def __init__(self, relay=True):
+    def __init__(self, relay=True, lan_ip=None, online_ip=LOBBY_IP):
         self.turn_uri = "turn:relay.example.org:3478" if relay else None
         self.turn_secret = "a_long_random_string" if relay else None
-        self.online_ip = LOBBY_IP
+        self.turn_lan_ip = lan_ip  # line 4 of server_turn.txt: relay behind the lobby's NAT
+        self.online_ip = online_ip
         self.local_ip = LOBBY_LAN
         self.trusted_proxies = set()
         self.channels = {}
@@ -240,6 +243,31 @@ check(moved_lines(host) == ["BATTLEHOSTMOVED %s %s %s" % (battle.battle_id, MOVE
       "the host should get its own move back as the acknowledgement, got %r" % (host.sent,))
 check(plain.sent == [],
       "a client that did not ask for relay support should hear nothing, got %r" % (plain.sent,))
+
+
+# --- a relay behind the lobby's NAT: LAN joiners are told the LAN address on a move too --
+# BATTLEHOSTMOVED is the other line that carries a relayed battle's address, so it has to
+# make the same substitution BATTLEOPENED does, or a LAN joiner is stranded on the public
+# address the moment the host rebuilds its allocation.
+FakeClient._next_session = 1
+root = FakeRoot(lan_ip=RELAY_LAN, online_ip=LOBBY_PUBLIC)
+host = FakeClient(root, "nathost", compat=("u", "sp", "r"))
+lan_watcher = FakeClient(root, "lan_r", compat=("u", "sp", "r"), ip="10.42.43.7", local_ip="10.42.43.7")
+wan_watcher = FakeClient(root, "wan_r", compat=("u", "sp", "r"), ip=OUTSIDER)
+relayedhost(root, host, LOBBY_PUBLIC)
+battle = openbattle(root, host)
+check(address_of(advertised_to(root, lan_watcher, battle)) == RELAY_LAN,
+      "a LAN joiner should be told the relay's LAN address at open, got %r" % (advertised_to(root, lan_watcher, battle),))
+for c in (host, lan_watcher, wan_watcher):
+    c.sent = []
+check(moverelayedhost(root, host, LOBBY_PUBLIC, port=MOVED_PORT) == "",
+      "a move to a new port on the same behind-NAT relay should be accepted, got %r" % (host.sent,))
+check(moved_lines(lan_watcher) == ["BATTLEHOSTMOVED %s %s %s" % (battle.battle_id, RELAY_LAN, MOVED_PORT)],
+      "a LAN joiner should be told the LAN address on a move, got %r" % (lan_watcher.sent,))
+check(moved_lines(wan_watcher) == ["BATTLEHOSTMOVED %s %s %s" % (battle.battle_id, LOBBY_PUBLIC, MOVED_PORT)],
+      "an outsider should be told the public address on a move, got %r" % (wan_watcher.sent,))
+check(moved_lines(host) == ["BATTLEHOSTMOVED %s %s %s" % (battle.battle_id, LOBBY_PUBLIC, MOVED_PORT)],
+      "the host (on WAN) should see the public address in its own acknowledgement, got %r" % (host.sent,))
 
 
 # --- IPv6 moves too, in canonical form ---------------------------------------------

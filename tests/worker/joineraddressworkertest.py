@@ -28,6 +28,7 @@ def check(cond, label):
 class FakeRoot:
     def __init__(self, relay=True):
         self.turn_uri = "turn:relay.example.org:3478" if relay else None
+        self.turn_lan_ip = None
         self.turn_secret = "a_long_random_string" if relay else None
         self.trusted_proxies = set([PROXY])
         self.sessions = {}

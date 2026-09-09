@@ -465,6 +465,7 @@ Lets a player who cannot forward a port host a battle through a TURN relay. When
 line 1: TURN URI              (required)
 line 2: shared secret         (required)
 line 3: credential lifetime   (optional, seconds, default 43200)
+line 4: relay LAN address     (optional, only when the relay is behind this lobby's NAT)
 ```
 
 **Example:**
@@ -473,6 +474,15 @@ line 3: credential lifetime   (optional, seconds, default 43200)
 turn:relay.example.org:3478
 a_long_random_string
 43200
+```
+
+**Example, relay behind the same NAT as the lobby:**
+
+```
+turn:relay.example.org:3478
+a_long_random_string
+43200
+10.42.42.20
 ```
 
 The TURN server can run anywhere, on this machine or another host. It needs `use-auth-secret` turned on and a `static-auth-secret` set to the same string as line 2. coturn then recomputes each credential itself, so it never talks to the lobby and keeps no session state.
@@ -484,6 +494,13 @@ This file is only the lobby's half. Running the relay itself, what it costs to r
 Line 3 is the number of seconds a credential stays valid. coturn judges the credential once, when it creates the session, and checks later requests against the key it kept, so an expiry passing under a live allocation costs nothing. What cuts a game off is expiry before the relay has to be rebuilt, because a rebuild opens a new session, the credential is judged again, and a dead one is refused. The default of 43200 (12 hours) is sized to outlast a long game, because the relay agent keeps running after the lobby connection has gone and nothing can ask for a replacement.
 
 Do not set line 3 below 5115 seconds. Coilbox refuses to open a relayed battle on a credential shorter than that and says so before anybody joins, and the server logs a warning at startup if you configure one. The figure is 5083 seconds, the 99th percentile of 18418 real games from api.bar-rts.com covering 22 to 29 August 2026, plus the relay agent's 32 second worst-case rebuild backoff. Median over those games was 1302s and p90 3051s, so the floor sits well clear of ordinary play. The derivation is tomjn/coilbox#2091, and the coturn behaviour it rests on was measured against 4.17.2 in tomjn/coilbox#2041. Other clients may accept less, which is why a lifetime under the floor is a warning rather than a refusal.
+
+Line 4 is for a relay that sits behind the same NAT as the lobby, whether that is the lobby machine itself or another box on the same LAN. Set it to the relay's LAN address and leave it out otherwise. It changes two things, and both are needed for that deployment to work at all:
+
+- The lobby accepts its own public address from a relay host. coturn's `external-ip` is the NAT's public address, which is the lobby's, and without line 4 `RELAYEDHOST` refuses it as "this lobby server, not a relay". That refusal is there to stop a client passing off the lobby's port-forwarded hosts as its own, and it stays in place for every other address and for every lobby without line 4.
+- A joiner whose lobby connection comes from a private address is on the lobby's own LAN, and is told the address on line 4 instead of the public one, in both `BATTLEOPENED` and `BATTLEHOSTMOVED`. The public one would have to be hairpinned back in through the router, and a router that does so rewrites the source, so coturn would see an address other than the one the host installed a permission for from `CLIENTIP`. Line 4 puts that joiner straight onto coturn's LAN socket instead. For it to work coturn also has to be allowed to relay to your LAN, which the example config denies: add an `allowed-peer-ip` covering your subnet, as the [runbook](docs/ops/relay-hosting-setup.md) describes.
+
+Line 4 has to be a private address (RFC 1918 or IPv6 unique-local), and line 3 has to be present for line 4 to be read. If you later move the relay to a machine outside your NAT, remove line 4 along with changing line 1.
 
 Treat the secret like a password: anyone who has it can mint credentials for your relay. The server never logs it and never sends it to a client.
 
@@ -663,7 +680,7 @@ This section is reference material, organised by topic. Doing it for the first t
 
 The lobby never connects to the relay. It mints a credential as an HMAC of a shared secret, and coturn recomputes the same HMAC from its own copy of that secret. Neither process holds state about the other and neither has to be able to reach the other.
 
-That means the relay can be a container alongside the lobby, a second machine in the same rack, or a machine on another continent, and the lobby's configuration is the same three lines in every case. Moving it later is one edit to line 1 of `server_turn.txt` and a lobby restart.
+That means the relay can be a container alongside the lobby, a second machine in the same rack, or a machine on another continent, and the lobby's configuration is the same three lines in every case, plus a fourth naming the relay's LAN address when it shares the lobby's NAT. Moving it later is one edit to line 1 of `server_turn.txt`, dropping or changing line 4, and a lobby restart.
 
 The one thing that has to match is the secret. `static-auth-secret` in the coturn config and line 2 of `server_turn.txt` must be the same string, byte for byte. **Nothing detects a mismatch.** coturn refuses every credential it is handed, every relayed battle fails to start, and the lobby has no idea. Change one, change the other.
 
@@ -679,6 +696,8 @@ The one thing that has to match is the secret. `static-auth-secret` in the cotur
 The third row is the one worth thinking about. A relayed battle outlives the lobby connection that started it: the credential is minted once, sized to outlast a whole game, and nothing ever asks for a replacement. Under Compose, `docker compose restart uberserver` leaves the relay alone, but a reboot or a `docker compose down` does not, and on a shared machine that ends games which had nothing to do with the lobby.
 
 Sharing is cheaper and there is nothing wrong with starting there. Splitting is the upgrade, and because the lobby side does not change, it is an upgrade you can make later.
+
+A third option sits between the two: another machine on the same LAN as the lobby, behind the same router. It gets the second column's isolation without a second bill or a second public address, and the router forwards the relay's ports to it instead of to the lobby. Both this and the shared-machine option put the relay behind the lobby's own NAT, which the lobby has to be told about with line 4 of [`server_turn.txt`](#server_turntxt---relay-hosting-turn): without it the lobby refuses the relay's public address, because it is the lobby's own.
 
 ### Where you put it decides the latency players pay
 
@@ -769,6 +788,8 @@ There is no correct value for any of them. What there is, is arithmetic:
 - **`bps-capacity`** is bytes per second across the whole server, each direction counted separately. This is the one that stops the relay starving everything else on the machine, and the one that caps your bandwidth bill. Size it from the link you are paying for.
 
 The example config also denies the private address ranges as relay peers. On a shared machine, an unrestricted relay will happily forward to the lobby, the database, and anything else on the private network.
+
+The one reason to open a hole in that is players on the lobby's own LAN. A relay behind the lobby's NAT is told about them with line 4 of `server_turn.txt`, which sends them to coturn's LAN address, and coturn then needs `allowed-peer-ip` for their subnet or it refuses to forward to them. `allowed-peer-ip` wins over `denied-peer-ip`, so add the one line for your subnet and leave the deny list alone. It means anyone with a relay allocation can have packets forwarded to any address on that subnet, so keep it to the subnet the players are on, and if there is something on it you would rather not expose, list the allowed range in two pieces around it.
 
 ### TLS on 5349
 

@@ -41,6 +41,7 @@ class FakeRoot:
         self.turn_uri = uri
         self.turn_secret = secret
         self.turn_ttl = ttl
+        self.turn_lan_ip = None
         self.recent_turn_credentials = {}
         self.SayHooks = None
     def turn_enabled(self):
@@ -75,14 +76,22 @@ def compflags(root):
 
 
 # --- the config parser -------------------------------------------------------------
-check(parse_turn_config([URI, SECRET]) == (URI, SECRET, TURN_DEFAULT_TTL),
-      "two lines should parse to (uri, secret, default ttl), got %r" % (parse_turn_config([URI, SECRET]),))
+check(parse_turn_config([URI, SECRET]) == (URI, SECRET, TURN_DEFAULT_TTL, None),
+      "two lines should parse to (uri, secret, default ttl, no LAN address), got %r" % (parse_turn_config([URI, SECRET]),))
 check(TURN_DEFAULT_TTL == 43200,
       "the default lifetime should be 12 hours (43200s), got %r" % (TURN_DEFAULT_TTL,))
 check(parse_turn_config([URI, SECRET, "60"])[2] == 60,
       "line 3 should set the lifetime")
-check(parse_turn_config(["# a comment", "", URI, SECRET]) == (URI, SECRET, TURN_DEFAULT_TTL),
+check(parse_turn_config(["# a comment", "", URI, SECRET]) == (URI, SECRET, TURN_DEFAULT_TTL, None),
       "blank and commented lines should be skipped")
+
+# line 4: the relay's LAN address, for a relay behind the lobby's own NAT
+check(parse_turn_config([URI, SECRET, "43200", "10.42.42.20"])[3] == "10.42.42.20",
+      "line 4 should set the relay LAN address, got %r" % (parse_turn_config([URI, SECRET, "43200", "10.42.42.20"]),))
+check(parse_turn_config([URI, SECRET, "43200", "fd00::20"])[3] == "fd00::20",
+      "line 4 should accept a unique-local IPv6 address")
+check(parse_turn_config([URI, SECRET, "43200", "010.42.42.20".lstrip("0")])[3] == "10.42.42.20",
+      "line 4 should be handed back canonicalised")
 
 def rejects(lines, label):
     try:
@@ -97,6 +106,11 @@ rejects(["turn:relay example.org:3478", SECRET], "URI containing a space")
 rejects([URI, SECRET, "twelve hours"], "non-numeric lifetime")
 rejects([URI, SECRET, "0"], "zero lifetime")
 rejects([URI, SECRET, "-1"], "negative lifetime")
+rejects([URI, SECRET, "43200", "relay.lan"], "line 4 that is not an address")
+rejects([URI, SECRET, "43200", "8.8.8.8"], "line 4 that is a public address")
+rejects([URI, SECRET, "43200", "127.0.0.1"], "line 4 that is loopback")
+rejects([URI, SECRET, "43200", "169.254.1.1"], "line 4 that is link-local")
+rejects([URI, SECRET, "43200", "0.0.0.0"], "line 4 that is the unspecified address")
 
 
 # --- a lifetime below what clients accept warns, and is still honoured --------------
