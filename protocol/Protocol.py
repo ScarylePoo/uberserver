@@ -4122,7 +4122,7 @@ class Protocol:
 		# reset password, send the new password by email to the user
 		# if the user does not have an email address associated to their account, it can be added with newmail
 		if not self.verificationdb.active():
-			self.out_SERVERMSG("Email verification is currently turned off, account recovery is disabled")
+			self.out_SERVERMSG(client, "Email verification is currently turned off, account recovery is disabled")
 			return
 			
 		recover_client = self.clientFromUsername(username, True) 
