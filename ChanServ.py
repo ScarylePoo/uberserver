@@ -544,7 +544,7 @@ class ChanServClient(Client):
 				if op_entry:
 					op_list += separator + op_entry.username
 					if separator == '[': separator = ' '
-				if separator == ' ': op_list += ']'
+			if separator == ' ': op_list += ']'
 			if separator!=' ': op_list += 'empty'
 			users = channel.users
 			bridged_users = channel.bridged_users
