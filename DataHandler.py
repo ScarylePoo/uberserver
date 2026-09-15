@@ -210,7 +210,7 @@ class DataHandler:
 		# simultaneously backed up on their write buffers (the 2.3 producer signal), new
 		# logins are queued FIFO and drained by drain_login_queue() (a 1s LoopingCall) once
 		# the backpressure clears. Under normal load the queue stays empty.
-		self.login_queue = collections.deque() # (client, login_args) awaiting login under backpressure
+		self.login_queue = collections.deque() # (client, login_now carrying the LOGIN's msg_id, login_args) awaiting login under backpressure
 		self.login_backpressure_limit = 50     # paused-producer count above which login admission pauses
 
 		# rate limits
@@ -807,11 +807,11 @@ class DataHandler:
 		# shares login_queue with in_LOGIN without locking. Each login gets its own session
 		# commit/rollback/close, mirroring the per-request guards in dataReceived.
 		while self.login_queue and not self.login_backpressured():
-			client, args = self.login_queue.popleft()
+			client, login_now, args = self.login_queue.popleft()
 			if client.session_id not in self.clients:
 				continue # client disconnected while queued
 			try:
-				self.protocol.login_now(client, *args)
+				login_now(client, *args)
 				self.session_manager.commit_guard()
 			except:
 				logging.error(traceback.format_exc())
