@@ -978,10 +978,11 @@ class UsersHandler:
 		return [(u.username, u.last_login.isoformat() if u.last_login else None) for u in self.find_ip(ip)]
 
 	def get_ip(self, username):
+		# (exists, last_ip), so GETIP can tell an unknown user from one with no stored IP
 		entry = self.sess().query(User).filter(User.username==username).first()
 		if not entry:
-			return None
-		return entry.last_ip
+			return False, None
+		return True, entry.last_ip
 
 	def list_mods(self):
 		response_mods = self.sess().query(User).filter('mod' == User.access)
