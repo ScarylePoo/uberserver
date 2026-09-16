@@ -382,6 +382,19 @@ Failure cases, all reported as `TURNCREDENTIALSFAILED <reason>`:
 - the server could not build a credential whose fields are free of spaces, which means its
   TURN URI is misconfigured
 
+#### Relayed battles (`BATTLEISRELAYED`)
+
+```
+S> BATTLEISRELAYED <battle_id>
+```
+
+Follows the `BATTLEOPENED` for a battle opened after `RELAYEDHOST`, both when the battle opens
+and in the battle list sent at login, and only to clients that sent `r`. It says the battle's
+traffic goes through a TURN relay, so a client can tell a joiner why their ping is worse than
+in a direct game. `BATTLEOPENED` itself is unchanged, which is what lets a client without relay
+support join. A battle stays relayed until `BATTLECLOSED`: `MOVERELAYEDHOST` only moves a
+battle that already is one, so nothing turns a direct battle into a relayed one.
+
 #### Joiner addresses (`CLIENTIP`)
 
 A TURN relay only forwards traffic from an address the host has already installed a
