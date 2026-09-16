@@ -357,12 +357,19 @@ The relay recomputes the HMAC from a `static-auth-secret` it shares with the lob
 two processes never talk and neither holds session state. The secret is server configuration
 (`server_turn.txt`, see the README) and is never sent to a client.
 
-`uri` is `turn:host:port` as RFC 7065 writes it. A `turns:` URI, TURN over TLS, is reserved
-until a client supports one. The server does not refuse it, since its job is to hand out what
-the operator configured, but it warns at startup, and no client implements TLS today. A client
-that cannot use TLS should refuse a `turns:` URI in words rather than treat it as `turn:`,
-because sending plain UDP at a TLS port fails as a relay that never answers rather than as
-anything the person hosting could read.
+`uri` is one or more relays as RFC 7065 writes them, separated by commas with no spaces:
+`turn:host:port` for TURN over UDP and `turns:host:port` for TURN over TLS, for example
+`turn:relay.example.org:3478,turns:relay.example.org:5349`. Every relay in the list takes the
+same credential. A client should try the `turn:` relays first and a `turns:` relay only when
+UDP gets no answer, because TLS adds delay under every game. A refusal is an answer, so it is
+not a reason to try the next relay.
+
+A client that cannot use TLS should refuse a `turns:` URI in words rather than treat it as
+`turn:`, because sending plain UDP at a TLS port fails as a relay that never answers rather
+than as anything the person hosting could read. Coilbox reads the list and `turns:` from
+tomjn/coilbox#2885. The server warns at startup when the configured `uri` is a list or names
+`turns:`, since a client from before that cannot use it, and warns again when it names only
+`turns:`, since then every host pays for TLS.
 
 `ttl_seconds` is how long the credential stays valid, 43200 (12 hours) by default and set by
 the operator. It is sized against a whole game rather than battle setup. coturn judges the

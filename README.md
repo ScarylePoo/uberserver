@@ -462,7 +462,7 @@ Get a free API key at https://iphub.info — the free tier allows 1,000 checks p
 Lets a player who cannot forward a port host a battle through a TURN relay. When this file is present the server advertises the `r` compatibility flag and answers the `TURNCREDENTIALS` command with a credential the relay will accept.
 
 ```
-line 1: TURN URI              (required)
+line 1: TURN URI, or several separated by commas   (required)
 line 2: shared secret         (required)
 line 3: credential lifetime   (optional, seconds, default 43200)
 line 4: relay LAN address     (optional, only when the relay is behind this lobby's NAT)
@@ -487,7 +487,13 @@ a_long_random_string
 
 The TURN server can run anywhere, on this machine or another host. It needs `use-auth-secret` turned on and a `static-auth-secret` set to the same string as line 2. coturn then recomputes each credential itself, so it never talks to the lobby and keeps no session state.
 
-Line 1 must name `turn:`, not `turns:`. No client speaks TURN over TLS yet. Coilbox's relay agent uses plain UDP and refuses a `turns:` relay in words rather than quietly downgrading it, so configuring one stops relay hosting working for every player while the rest of the setup looks correct. The server logs a warning at startup if you set one. Your relay can still serve TLS on 5349 for whenever a client can use it, which is covered under [TLS on 5349](#tls-on-5349).
+Line 1 can name a TURN over TLS relay as well, for players whose network blocks UDP, by listing both with a comma and no spaces:
+
+```
+turn:relay.example.org:3478,turns:relay.example.org:5349
+```
+
+A client tries the `turn:` relay first and moves to `turns:` only when UDP gets no answer. Only a coilbox with TURN over TLS ([tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885)) reads a list or a `turns:` URI. An older coilbox cannot reach the relay at all, so keep line 1 to a single `turn:` URI until your players have updated. The server logs a warning at startup whenever line 1 is a list or names `turns:`. Do not name `turns:` on its own either: every host would go over TLS, which adds delay even where UDP works, and the server warns about that too. [TLS on 5349](#tls-on-5349) covers what the relay needs.
 
 This file is only the lobby's half. Running the relay itself, what it costs to run, and how to check it works are in [Relay Hosting (TURN)](#relay-hosting-turn). If you are turning relay hosting on for the first time, follow [docs/ops/relay-hosting-setup.md](docs/ops/relay-hosting-setup.md), which puts the whole job in order.
 
@@ -795,7 +801,9 @@ The one reason to open a hole in that is players on the lobby's own LAN. A relay
 
 Plain TURN is UDP to port 3478, and some networks will not pass that. TURNS over TLS on 5349 looks like ordinary TLS traffic and gets through more of them.
 
-No client can use it yet. Coilbox's relay agent speaks plain UDP, and it is the only client that implements relay hosting at all. Serving TLS costs nothing and does no harm, so set it up if you want it ready, but **leave line 1 of `server_turn.txt` as `turn:`**. Naming a `turns:` URI there is the one change that breaks relay hosting for every player while everything else looks right, because coilbox refuses the URI rather than sending UDP at a TLS port and failing as a relay that never answers. The server logs a warning at startup if you configure one.
+Coilbox uses it from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885), which only the lobby can tell it about: add a `turns:` URI after the `turn:` one on line 1 of `server_turn.txt`, as that section shows. An older coilbox cannot use a line 1 written that way, so serve TLS whenever you like but add it to line 1 once your players have a coilbox that includes it. Serving TLS on its own costs nothing and does no harm.
+
+Only the leg between the host and the relay goes over TLS. Players still send UDP to the relayed address, so the relay ports stay UDP.
 
 It needs a certificate from a CA the players' clients already trust, with a name matching the host in line 1 of `server_turn.txt`. The lobby's self-signed `server.pem` will not do, because a client that checks the chain refuses it. `tls-listening-port`, `cert` and `pkey` are commented out together in the example config. Uncomment all three or none, because coturn logs an error and does not listen if the port is set without a usable certificate.
 

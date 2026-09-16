@@ -47,7 +47,8 @@ except:
 
 def parse_turn_config(lines):
 	# server_turn.txt:
-	#   line 1: TURN URI, e.g. turn:relay.example.org:3478
+	#   line 1: TURN URI, e.g. turn:relay.example.org:3478, or several separated by commas,
+	#           e.g. turn:relay.example.org:3478,turns:relay.example.org:5349
 	#   line 2: static-auth-secret, shared with coturn's use-auth-secret
 	#   line 3: credential lifetime in seconds (optional)
 	#   line 4: the relay's LAN address, only when the relay sits behind the same NAT as
@@ -62,12 +63,22 @@ def parse_turn_config(lines):
 	uri, secret = lines[0], lines[1]
 	if any(c.isspace() for c in uri):
 		raise ValueError('the TURN URI on line 1 must not contain whitespace')
-	# A warning for the same reason the lifetime floor below is one. The server mints what
-	# the operator asked for, and a client other than coilbox may well speak TLS. But no
-	# client does today, and configuring this is the one way to break relay hosting for
-	# everybody while every other part of the setup looks correct.
-	if uri.startswith('turns:'):
-		logging.warning('server_turn.txt line 1 names a turns: URI. Coilbox speaks plain UDP and refuses a turns: relay in words, so relay hosting will not work for its players. Another client may support TLS. To serve TLS as well, leave line 1 as turn: and let coturn listen on 5349 for the clients that can use it. See the server_turn.txt section of the README.')
+	# The URI field goes to the client as it is, so an empty entry would reach it as a
+	# relay with no address.
+	entries = uri.split(',')
+	if any(not entry for entry in entries):
+		raise ValueError('the TURN URIs on line 1 are separated by commas, and one of them is empty')
+	tls = [entry for entry in entries if entry.startswith('turns:')]
+	# Warnings for the same reason the lifetime floor below is one: the server mints what
+	# the operator asked for. But a coilbox without TURN over TLS reads the whole field as
+	# one address and cannot use it, and that breaks relay hosting for its players while
+	# every other part of the setup looks correct.
+	if tls or len(entries) > 1:
+		logging.warning('server_turn.txt line 1 names %s. Only a coilbox with TURN over TLS (tomjn/coilbox#2885) can use that, and an older one cannot reach the relay at all, so relay hosting will not work for its players. See the server_turn.txt section of the README.' % ('a turns: URI' if tls else 'more than one URI'))
+	# A client tries plain UDP first and TLS only when UDP gets no answer. With nothing
+	# else to try, every host pays for TLS, which adds delay under every game.
+	if tls and len(tls) == len(entries):
+		logging.warning('server_turn.txt line 1 names only turns: URIs, so every relayed battle goes over TLS, even for hosts whose UDP works. Put a turn: URI first, for example turn:relay.example.org:3478,turns:relay.example.org:5349.')
 	ttl = TURN_DEFAULT_TTL
 	if len(lines) > 2:
 		try:

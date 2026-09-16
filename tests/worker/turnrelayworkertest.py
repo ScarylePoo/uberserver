@@ -103,6 +103,8 @@ def rejects(lines, label):
 rejects([], "empty file")
 rejects([URI], "URI but no secret")
 rejects(["turn:relay example.org:3478", SECRET], "URI containing a space")
+rejects([URI + ",", SECRET], "a list with an empty entry")
+rejects([",turns:relay.example.org:5349", SECRET], "a list that starts with an empty entry")
 rejects([URI, SECRET, "twelve hours"], "non-numeric lifetime")
 rejects([URI, SECRET, "0"], "zero lifetime")
 rejects([URI, SECRET, "-1"], "negative lifetime")
@@ -147,20 +149,30 @@ _, at_default = parse_and_capture([URI, SECRET])
 check(at_default == [], "the default lifetime should not warn, got %r" % (at_default,))
 
 
-# --- a turns: URI warns, and is still honoured -------------------------------------
-# Coilbox refuses a turns: relay in words, because its relay agent speaks plain UDP and
-# sending UDP at a TLS port would fail as a relay that never answers. Same shape as the
-# lifetime floor above: the operator hears about it, and the server still mints what it
-# was asked for, because another client may support TLS.
+# --- a list or a turns: URI warns, and is still honoured ---------------------------
+# Only a coilbox with TURN over TLS (tomjn/coilbox#2885) reads a list or a turns: URI, and
+# an older one cannot reach the relay at all. Same shape as the lifetime floor above: the
+# operator hears about it, and the server still mints what it was asked for.
 TURNS_URI = "turns:relay.example.org:5349"
+BOTH_URIS = URI + "," + TURNS_URI
+
+both_config, both_warned = parse_and_capture([BOTH_URIS, SECRET])
+check(both_config[0] == BOTH_URIS,
+      "a list should be handed back as written, got %r" % (both_config,))
+check(len(both_warned) == 1 and "coilbox#2885" in both_warned[0],
+      "a list should warn once, naming the coilbox change it needs, got %r" % (both_warned,))
+
+udp_list_config, udp_list_warned = parse_and_capture([URI + ",turn:relay2.example.org:3478", SECRET])
+check(len(udp_list_warned) == 1 and "more than one URI" in udp_list_warned[0],
+      "a list of turn: URIs still needs a newer coilbox, got %r" % (udp_list_warned,))
 
 turns_config, turns_warned = parse_and_capture([TURNS_URI, SECRET])
 check(turns_config[0] == TURNS_URI,
       "a turns: URI should still be honoured, got %r" % (turns_config,))
-check(any("turns:" in w for w in turns_warned),
-      "a turns: URI should warn and name the scheme, got %r" % (turns_warned,))
-check(any("coilbox" in w.lower() for w in turns_warned),
-      "the warning should name the client that refuses it, got %r" % (turns_warned,))
+check(any("coilbox#2885" in w for w in turns_warned),
+      "a turns: URI should warn about older clients, got %r" % (turns_warned,))
+check(any("only turns:" in w for w in turns_warned),
+      "a turns: URI on its own should warn that every host pays for TLS, got %r" % (turns_warned,))
 
 _, plain_warned = parse_and_capture([URI, SECRET])
 check(plain_warned == [],
@@ -217,6 +229,12 @@ if len(parts) == 5:
     check(password != base64.b64encode(
         hmac.new(b"wrong_secret", username.encode("utf-8"), hashlib.sha1).digest()).decode("utf-8"),
         "password must depend on the configured secret")
+
+
+# --- a list reaches the wire as one field -------------------------------------------
+parts = ask(FakeRoot(uri=BOTH_URIS)).split(" ")
+check(len(parts) == 5 and parts[1] == BOTH_URIS,
+      "a list should be sent as the one URI field, got %r" % (parts,))
 
 
 # --- the lifetime is the operator's, not a constant --------------------------------
