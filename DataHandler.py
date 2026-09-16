@@ -68,17 +68,13 @@ def parse_turn_config(lines):
 	entries = uri.split(',')
 	if any(not entry for entry in entries):
 		raise ValueError('the TURN URIs on line 1 are separated by commas, and one of them is empty')
-	tls = [entry for entry in entries if entry.startswith('turns:')]
-	# Warnings for the same reason the lifetime floor below is one: the server mints what
-	# the operator asked for. But a coilbox without TURN over TLS reads the whole field as
-	# one address and cannot use it, and that breaks relay hosting for its players while
-	# every other part of the setup looks correct.
-	if tls or len(entries) > 1:
-		logging.warning('server_turn.txt line 1 names %s. Only a coilbox with TURN over TLS (tomjn/coilbox#2885) can use that, and an older one cannot reach the relay at all, so relay hosting will not work for its players. See the server_turn.txt section of the README.' % ('a turns: URI' if tls else 'more than one URI'))
-	# A client tries plain UDP first and TLS only when UDP gets no answer. With nothing
-	# else to try, every host pays for TLS, which adds delay under every game.
-	if tls and len(tls) == len(entries):
-		logging.warning('server_turn.txt line 1 names only turns: URIs, so every relayed battle goes over TLS, even for hosts whose UDP works. Put a turn: URI first, for example turn:relay.example.org:3478,turns:relay.example.org:5349.')
+	# A warning for the same reason the lifetime floor below is one: the server mints what
+	# the operator asked for. A client without the 'turns' flag is sent the first turn:
+	# entry (Protocol.turnUriFor), so with none there it is refused a credential. And a
+	# client tries plain UDP first and TLS only when UDP gets no answer, so with nothing
+	# else to try every host pays for TLS, which adds delay under every game.
+	if all(entry.startswith('turns:') for entry in entries):
+		logging.warning('server_turn.txt line 1 names only turns: URIs. A client without TURN over TLS will be refused a credential, and every relayed battle goes over TLS, even for hosts whose UDP works. Put a turn: URI first, for example turn:relay.example.org:3478,turns:relay.example.org:5349. See the server_turn.txt section of the README.')
 	ttl = TURN_DEFAULT_TTL
 	if len(lines) > 2:
 		try:

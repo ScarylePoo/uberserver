@@ -493,7 +493,9 @@ Line 1 can name a TURN over TLS relay as well, for players whose network blocks 
 turn:relay.example.org:3478,turns:relay.example.org:5349
 ```
 
-A client tries the `turn:` relay first and moves to `turns:` only when UDP gets no answer. Only a coilbox with TURN over TLS ([tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885)) reads a list or a `turns:` URI. An older coilbox cannot reach the relay at all, so keep line 1 to a single `turn:` URI until your players have updated. The server logs a warning at startup whenever line 1 is a list or names `turns:`. Do not name `turns:` on its own either: every host would go over TLS, which adds delay even where UDP works, and the server warns about that too. [TLS on 5349](#tls-on-5349) covers what the relay needs.
+A client tries the `turn:` relay first and moves to `turns:` only when UDP gets no answer. The whole list goes only to clients that sent the `turns` compatibility flag, which coilbox does from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885). Every other client is sent the first `turn:` entry and works as before, so the list is safe to add before players update.
+
+Keep a `turn:` URI in the list. With only `turns:`, a client without the flag is refused a credential, and every host goes over TLS, which adds delay even where UDP works. The server logs a warning at startup if line 1 names only `turns:`. [TLS on 5349](#tls-on-5349) covers what the relay needs.
 
 This file is only the lobby's half. Running the relay itself, what it costs to run, and how to check it works are in [Relay Hosting (TURN)](#relay-hosting-turn). If you are turning relay hosting on for the first time, follow [docs/ops/relay-hosting-setup.md](docs/ops/relay-hosting-setup.md), which puts the whole job in order.
 
@@ -801,7 +803,7 @@ The one reason to open a hole in that is players on the lobby's own LAN. A relay
 
 Plain TURN is UDP to port 3478, and some networks will not pass that. TURNS over TLS on 5349 looks like ordinary TLS traffic and gets through more of them.
 
-Coilbox uses it from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885), which only the lobby can tell it about: add a `turns:` URI after the `turn:` one on line 1 of `server_turn.txt`, as that section shows. An older coilbox cannot use a line 1 written that way, so serve TLS whenever you like but add it to line 1 once your players have a coilbox that includes it. Serving TLS on its own costs nothing and does no harm.
+Coilbox uses it from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885), and only the lobby can tell it where it is: add a `turns:` URI after the `turn:` one on line 1 of `server_turn.txt`, as that section shows. Older clients are still sent the `turn:` URI alone.
 
 Only the leg between the host and the relay goes over TLS. Players still send UDP to the relayed address, so the relay ports stay UDP.
 

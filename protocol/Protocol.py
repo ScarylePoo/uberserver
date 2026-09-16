@@ -202,12 +202,14 @@ flag_map = {
 	'b':  'battleAuth',      # JOINBATTLEACCEPT/JOINBATTLEDENIED (typically only sent by autohosts)
 	'jsonchat': 'jsonChat',  # microsecond timestamps in JSON chat frames, JSON SAIDPRIVATE
 	'r':  'relay',           # understands relay-hosted battles, can ask for TURN credentials
+	'turns': 'relayTls',     # can use turns: and a list of relays in TURNCREDENTIALS
 }
 # optional flags
 optional_flags = (
 	'b', # only useful to autohosts -> permanently optional
 	'jsonchat', # progressive enhancement: without it chat still works, just without timestamps
 	'r', # only useful to clients that can relay -> permanently optional
+	'turns', # only useful to clients that can relay over TLS -> permanently optional
 )
 
 # flags for functionality that is now either compulsory or was removed
@@ -3398,13 +3400,28 @@ class Protocol:
 		# unknown, it must simply get a clean TURNCREDENTIALSFAILED if it asks.
 		flags = ""
 		for flag in flag_map:
-			if flag == 'r' and not self._root.turn_enabled():
+			if flag in ('r', 'turns') and not self._root.turn_enabled():
 				continue
 			if len(flags)>0:
 				flags += " " + flag
 			else:
 				flags = flag
 		client.Send("COMPFLAGS %s" %(flags))
+
+	def turnUriFor(self, client):
+		'''
+		The URI field of a TURNCREDENTIALS reply for this client. server_turn.txt line 1
+		can list several relays, and only a client with 'turns' can read a list or use a
+		turns: relay: an older one reads the whole field as one address it cannot reach.
+		So everybody else gets the first plain turn: entry, or None when there is none.
+		'''
+		uri = self._root.turn_uri
+		if 'turns' in client.compat:
+			return uri
+		for entry in uri.split(','):
+			if not entry.startswith('turns:'):
+				return entry
+		return None
 
 	def in_TURNCREDENTIALS(self, client):
 		'''
@@ -3424,7 +3441,10 @@ class Protocol:
 		ttl = self._root.turn_ttl
 		username = '%d:%s' % (int(time.time()) + ttl, client.user_id)
 		password = base64.b64encode(hmac.new(self._root.turn_secret.encode('utf-8'), username.encode('utf-8'), hashlib.sha1).digest()).decode('utf-8')
-		uri = self._root.turn_uri
+		uri = self.turnUriFor(client)
+		if uri is None:
+			client.Send('TURNCREDENTIALSFAILED This server relays only over TLS, which this client does not support. Please update it.')
+			return
 
 		# The reply is exactly four space-separated fields and the client refuses the whole
 		# line if any of them is empty or shifted. Whitespace anywhere but the separators

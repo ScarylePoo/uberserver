@@ -176,7 +176,7 @@ turn:relay.example.org:3478
 
 Line 4 is what lets the lobby accept its own public address from a relay host, and what sends players on your LAN to the relay's LAN socket instead of out through the router and back. Leave it out for a relay anywhere else. Line 3 has to be written for line 4 to be read.
 
-If you gave coturn a certificate and a [TLS listener](../../README.md#tls-on-5349), line 1 can list it after the plain relay, for players whose network blocks UDP: `turn:relay.example.org:3478,turns:relay.example.org:5349`. Only a coilbox that includes [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885) can use that, and an older one cannot reach the relay at all. Until your players have updated, leave line 1 as the single `turn:` URI and add the `turns:` one later. The server logs a warning at startup whenever line 1 is a list or names `turns:`.
+If you gave coturn a certificate and a [TLS listener](../../README.md#tls-on-5349), line 1 can list it after the plain relay, for players whose network blocks UDP: `turn:relay.example.org:3478,turns:relay.example.org:5349`. Clients that can use TLS, which coilbox can from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885), get the whole list. Every other client is sent the `turn:` URI alone, so this is safe to add straight away. Keep the `turn:` URI first: with only `turns:` those clients are refused, and the server logs a warning at startup.
 
 Under Compose the file has to be mounted into the container to be read at all, because the lobby reads it from its working directory and that is `/app` inside the container. `docker-compose.yml` has the line commented out next to the motd and agreement mounts. Uncomment it and put `server_turn.txt` next to `docker-compose.yml`.
 
