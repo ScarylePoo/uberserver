@@ -795,7 +795,8 @@ class Protocol:
 
 	def broadcast_AddBattle(self, battle):
 		for cid, client in self._root.usernames.items():
-			client.Send(self.client_AddBattle(client, battle))
+			for line in self.client_AddBattleLines(client, battle):
+				client.Send(line)
 
 	def broadcast_RemoveBattle(self, battle):
 		for cid, client in self._root.usernames.items():
@@ -896,6 +897,24 @@ class Protocol:
 				and self._isPrivateIP(client.ip_address)):
 			return lan_ip
 		return relayed_ip
+
+	def client_AddBattleLines(self, client, battle):
+		'''
+		Everything that announces a battle to one client: its BATTLEOPENED, then
+		BATTLEISRELAYED <battle_id> when the battle goes through a relay and the client sent
+		'r'.
+
+		BATTLEOPENED for a relayed battle is identical to a direct one, which is what lets a
+		client with no relay support join it. That also leaves a joiner unable to tell why
+		their ping is worse, so a client that understands relay hosting is told separately,
+		gated on 'r' like CLIENTIP and BATTLEHOSTMOVED. A battle cannot become relayed after
+		it opens, because MOVERELAYEDHOST refuses one that was not, so this is the only place
+		it needs saying.
+		'''
+		lines = [self.client_AddBattle(client, battle)]
+		if battle.relayed_ip and 'r' in client.compat:
+			lines.append('BATTLEISRELAYED %s' % battle.battle_id)
+		return lines
 
 	def client_AddBattle(self, client, battle):
 		'sends the protocol for adding a battle'
@@ -1357,7 +1376,8 @@ class Protocol:
 			client.RealSend(self.client_AddUser(client, addclient))
 
 		for battleid, battle in self._root.battles.items():
-			client.RealSend(self.client_AddBattle(client, battle))
+			for line in self.client_AddBattleLines(client, battle):
+				client.RealSend(line)
 			client.RealSend('UPDATEBATTLEINFO %s %i %i %s %s' % (battle.battle_id, battle.spectators, battle.locked, battle.maphash, battle.map))
 			for session_id in battle.users:
 				battleclient = self.clientFromSession(session_id)

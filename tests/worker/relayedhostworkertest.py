@@ -319,6 +319,46 @@ for who in ("host", "samewan", "outsider"):
           "only the address should differ for %s:\n  %r\n  %r" % (who, relayed[who], direct[who]))
 
 
+# --- a relayed battle is named as one, to clients that asked for relay support -------
+# BATTLEISRELAYED follows BATTLEOPENED, only for a relayed battle and only for a client
+# that sent 'r' (tomjn/coilbox#2133). Everybody else sees exactly what they saw before.
+def announced(relayed):
+    FakeClient._next_session = 1
+    root = FakeRoot()
+    host = FakeClient(root, "host", compat=("u", "sp", "r"))
+    FakeClient(root, "relayaware", compat=("u", "sp", "r"), ip=OUTSIDER)
+    FakeClient(root, "plain", ip=OUTSIDER)
+    if relayed:
+        relayedhost(root, host, RELAY_V4)
+    openbattle(root, host)
+    battle_id = root.usernames["host"].current_battle
+    return root, battle_id, {name: [l for l in client.sent if l.startswith(("BATTLEOPENED ", "BATTLEISRELAYED "))]
+                             for name, client in root.usernames.items()}
+
+root, battle_id, seen = announced(relayed=True)
+for who in ("host", "relayaware"):
+    check([l.split(" ")[0] for l in seen[who]] == ["BATTLEOPENED", "BATTLEISRELAYED"],
+          "%s sent 'r' and should be told BATTLEOPENED then BATTLEISRELAYED, got %r" % (who, seen[who]))
+    check(seen[who][-1] == "BATTLEISRELAYED %s" % battle_id,
+          "%s should be told which battle is relayed, got %r" % (who, seen[who]))
+check([l.split(" ")[0] for l in seen["plain"]] == ["BATTLEOPENED"],
+      "a client without 'r' should see only BATTLEOPENED, got %r" % (seen["plain"],))
+
+_, _, direct_seen = announced(relayed=False)
+for who, lines in direct_seen.items():
+    check([l.split(" ")[0] for l in lines] == ["BATTLEOPENED"],
+          "a direct battle should never be called relayed, %s got %r" % (who, lines))
+
+# somebody logging in later is told the same, from the battle list sent at login
+battle = root.battles[battle_id]
+late_aware = FakeClient(root, "lateaware", compat=("u", "sp", "r"), ip=OUTSIDER)
+late_plain = FakeClient(root, "lateplain", ip=OUTSIDER)
+check([l.split(" ")[0] for l in root.protocol.client_AddBattleLines(late_aware, battle)] == ["BATTLEOPENED", "BATTLEISRELAYED"],
+      "the login battle list should name a relayed battle to a client with 'r'")
+check([l.split(" ")[0] for l in root.protocol.client_AddBattleLines(late_plain, battle)] == ["BATTLEOPENED"],
+      "the login battle list should be unchanged for a client without 'r'")
+
+
 # --- the address belongs to one battle and no other -------------------------------
 root = FakeRoot()
 host = FakeClient(root, "twicehost", compat=("u", "sp", "r"))
