@@ -36,3 +36,4 @@ xmlrpc.log*
 venv/
 .env
 docker-compose.override.yml
+docker-compose.yml
