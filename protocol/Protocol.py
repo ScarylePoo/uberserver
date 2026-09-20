@@ -3145,6 +3145,8 @@ class Protocol:
 			self.out_SERVERMSG(client, "Ingame time: %d hours" % (ingame_time/60))
 			return
 		if not 'mod' in client.accesslevels:
+			self.out_SERVERMSG(client, 'GETUSERINFO failed. Insufficient rights.', True)
+			self.out_FAILED(client, 'GETUSERINFO', 'Insufficient rights.')
 			return
 		# mod requests client details
 		if not username:
@@ -3202,11 +3204,15 @@ class Protocol:
 	def _findip_done(self, results, client, address):
 		if client.session_id not in self._root.clients:
 			return # admin disconnected during the DB call
+		if not results:
+			self.out_SERVERMSG(client, 'No accounts found for %s' % address)
+			return
 		for username, lastlogin in results:
 			if username in self._root.usernames:
 				self.out_SERVERMSG(client, '<%s> is currently bound to %s.' % (username, address))
 			else:
 				self.out_SERVERMSG(client, '<%s> was recently bound to %s at %s' % (username, address, lastlogin or "Unknown"))
+		self.out_SERVERMSG(client, '-- End of accounts found for %s --' % address)
 
 	def _findip_failed(self, failure, client, address):
 		logging.error("FINDIP DB error for %s: %s" % (address, failure.getTraceback()))
@@ -3228,16 +3234,21 @@ class Protocol:
 			self.out_SERVERMSG(client, '<%s> is currently bound to %s' % (username, ip))
 			return
 
-		# 3.1: only the offline branch hits the DB (get_ip returns a plain string); defer it.
+		# 3.1: only the offline branch hits the DB (get_ip returns plain data), so defer it.
 		# The online check above is pure memory and stays on the reactor.
 		d = self._root.defer_db(self.userdb.get_ip, username)
 		d.addCallback(self._getip_done, client, username)
 		d.addErrback(self._getip_failed, client, username)
 
-	def _getip_done(self, ip, client, username):
+	def _getip_done(self, found, client, username):
 		if client.session_id not in self._root.clients:
 			return # admin disconnected during the DB call
-		if ip:
+		exists, ip = found
+		if not exists:
+			self.out_SERVERMSG(client, 'User <%s> does not exist' % username)
+		elif not ip:
+			self.out_SERVERMSG(client, 'No IP address is known for <%s>' % username)
+		else:
 			self.out_SERVERMSG(client, '<%s> was recently bound to %s' % (username, ip))
 
 	def _getip_failed(self, failure, client, username):
@@ -3344,6 +3355,7 @@ class Protocol:
 		else: # not online, try to load from db
 			user = self.clientFromUsername(username, True)
 			if not user:
+				self.out_SERVERMSG(client, 'User <%s> does not exist' % username)
 				return
 
 		bot = (mode.lower() in ('true', 'yes', '1'))
