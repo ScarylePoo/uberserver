@@ -35,3 +35,4 @@ xmlrpc.log*
 /dbconfig.py
 venv/
 .env
+docker-compose.override.yml
