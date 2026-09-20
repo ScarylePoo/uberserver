@@ -74,9 +74,13 @@ cannot drift. **[GAP]** the `@emits` convention does not exist yet — see
   argument may legitimately contain spaces (e.g. chat text, topics). This is the
   "sentence argument" behaviour. (`Protocol.py` `get_function_args`.)
 - **Message IDs.** A client may prefix a command with `#<id> ` to correlate a request
-  with the server's reply; the server echoes the id back on responses generated in that
-  command's handling. (`Client.py`.) **[GAP]** document exact echo semantics and which
-  responses carry the id vs which do not.
+  with the server's reply. The server puts the same `#<id> ` on every line it sends that
+  client as the answer to that command, including refusals (`SERVERMSG`, `FAILED`) and
+  replies that arrive later because the command waited on the database or the login queue.
+  Lines that are not an answer to the command carry no id, even when they arrive before
+  the answer: chat from other players, broadcasts, status changes, and offline messages
+  delivered after `LOGIN`. Lines sent to other clients as a result of the command carry no
+  id either. (`Client.py` `set_msg_id`, `with_msg_id`.)
 - **Tab-separated payloads.** Some structured fields (notably battle `script_tags`) use
   tab-separated `key=value` pairs. **[GAP]** enumerate every command that uses tab
   separation and the exact field grammar.

@@ -395,11 +395,17 @@ class Protocol:
 	def _handle(self, client, msg):
 		assert(type(msg) == str)
 
-		# client.Send() prepends client.msg_id if the current thread
-		# is the same thread as the client's handler.
-		# this works because handling is done in order for each ClientHandler thread
-		# so we can be sure client.Send() was performed in the client's own handling code.
+		# client.Send() prepends client.msg_id, so the id is set only while this command is
+		# handled. Restore rather than clear: ChanServ runs a mod command typed into #moderator
+		# through here while the same client's SAY is still being handled.
+		previous_msg_id = client.msg_id
 		msg = client.set_msg_id(msg)
+		try:
+			return self._dispatch(client, msg)
+		finally:
+			client.msg_id = previous_msg_id
+
+	def _dispatch(self, client, msg):
 		numspaces = msg.count(' ')
 
 		if (numspaces > 0):
@@ -1019,8 +1025,8 @@ class Protocol:
 		# the INSERT continue in _register_checked, preserving the original denial ordering.
 		email = email.lower()
 		d = self._root.defer_db(self.userdb.check_register_user, username, email, client.ip_address)
-		d.addCallback(self._register_checked, client, username, password, email)
-		d.addErrback(self._register_failed, client, username)
+		d.addCallback(client.with_msg_id(self._register_checked), client, username, password, email)
+		d.addErrback(client.with_msg_id(self._register_failed), client, username)
 
 	def _register_checked(self, verdict, client, username, password, email):
 		# reactor-thread callback after the uniqueness/ban check. Applies the same memory-only
@@ -1054,8 +1060,8 @@ class Protocol:
 
 		# hop 2: INSERT off the reactor; the worker catches the unique-constraint race.
 		d = self._root.defer_db(self.userdb.do_register_insert, username, password, client.ip_address, email)
-		d.addCallback(self._register_inserted, client, username, email)
-		d.addErrback(self._register_failed, client, username)
+		d.addCallback(client.with_msg_id(self._register_inserted), client, username, email)
+		d.addErrback(client.with_msg_id(self._register_failed), client, username)
 
 	def _register_inserted(self, verdict, client, username, email):
 		# reactor-thread callback after the INSERT.
@@ -1152,7 +1158,7 @@ class Protocol:
 		keeps the same signature so command dispatch (which reflects on it) is unchanged.
 		'''
 		if self._root.login_queue or self._root.login_backpressured():
-			self._root.login_queue.append((client, (username, password, cpu, local_ip, sentence_args)))
+			self._root.login_queue.append((client, client.with_msg_id(self.login_now), (username, password, cpu, local_ip, sentence_args)))
 			client.Send('SERVERMSG The server is busy; you are number %d in the login queue, please wait...' % len(self._root.login_queue))
 			return
 		self.login_now(client, username, password, cpu, local_ip, sentence_args)
@@ -1193,8 +1199,8 @@ class Protocol:
 		# _login_checked once the DB worker returns. The remaining memory-only checks and
 		# the denial ordering are applied in the callback, preserving the original flow.
 		d = self._root.defer_db(self.userdb.precheck_login, username, password, client.ip_address)
-		d.addCallback(self._login_checked, client, username, local_ip, sentence_args)
-		d.addErrback(self._login_failed, client, username)
+		d.addCallback(client.with_msg_id(self._login_checked), client, username, local_ip, sentence_args)
+		d.addErrback(client.with_msg_id(self._login_failed), client, username)
 
 	def _login_checked(self, result, client, username, local_ip, sentence_args):
 		# reactor-thread callback after precheck_login (result is plain data). Applies the
@@ -1239,8 +1245,8 @@ class Protocol:
 
 		# login checks complete; write the login record off the reactor thread.
 		d = self._root.defer_db(self.userdb.do_login, username, client.ip_address, agent, last_sys_id, last_mac_id, local_ip, client.country_code)
-		d.addCallback(self._login_finish, client, username, agent, local_ip)
-		d.addErrback(self._login_failed, client, username)
+		d.addCallback(client.with_msg_id(self._login_finish), client, username, agent, local_ip)
+		d.addErrback(client.with_msg_id(self._login_failed), client, username)
 
 	def _login_finish(self, result, client, username, agent, local_ip):
 		# reactor-thread callback after do_login. result is (snapshot, ignored_user_ids):
@@ -1466,8 +1472,8 @@ class Protocol:
 		# dump. _SendLoginInfo touches the DB on the reactor (get_ignored_user_ids), so the
 		# callback brackets it with the session guards exactly like _login_finish does.
 		d = self._root.defer_db(self.userdb.do_confirm_agreement, client.username)
-		d.addCallback(self._confirmagreement_done, client)
-		d.addErrback(self._confirmagreement_failed, client)
+		d.addCallback(client.with_msg_id(self._confirmagreement_done), client)
+		d.addErrback(client.with_msg_id(self._confirmagreement_failed), client)
 
 	def _confirmagreement_done(self, uid, client):
 		if client.session_id not in self._root.clients:
@@ -1675,8 +1681,8 @@ class Protocol:
 		# never echo a message that was refused (unknown user, bot target).
 		cmd = 'SAYPRIVATEEX' if ex_msg else 'SAYPRIVATE'
 		d = self._root.defer_db(self.userdb.do_enqueue_offline_message, client.user_id, user, msg, ex_msg)
-		d.addCallback(self._offline_message_queued, client, user, msg, cmd)
-		d.addErrback(self._offline_message_failed, client, user, cmd)
+		d.addCallback(client.with_msg_id(self._offline_message_queued), client, user, msg, cmd)
+		d.addErrback(client.with_msg_id(self._offline_message_failed), client, user, cmd)
 
 	def _offline_message_queued(self, result, client, user, msg, cmd):
 		# reactor-thread callback: pure send, no DB -> no commit/rollback/close bracket.
@@ -1937,8 +1943,8 @@ class Protocol:
 		# target's access; the already-ignored/list-full checks and the client.ignored
 		# mutation stay on the reactor thread (live memory) - see the callbacks below.
 		d = self._root.defer_db(self.userdb._user_access_from_username, username)
-		d.addCallback(self._ignore_resolved, client, username, reason)
-		d.addErrback(self._ignore_op_failed, client, "IGNORE")
+		d.addCallback(client.with_msg_id(self._ignore_resolved), client, username, reason)
+		d.addErrback(client.with_msg_id(self._ignore_op_failed), client, "IGNORE")
 
 	def _ignore_resolved(self, resolved, client, username, reason):
 		# reactor-thread callback: resolved is (target_id, access) or None. No reactor-side DB
@@ -1964,8 +1970,8 @@ class Protocol:
 			return
 		# checks passed: do the bare INSERT off the reactor, then sync memory + reply.
 		d = self._root.defer_db(self.userdb.do_ignore_insert, client.user_id, target_id, reason)
-		d.addCallback(self._ignore_stored, client, username, target_id, reason)
-		d.addErrback(self._ignore_op_failed, client, "IGNORE")
+		d.addCallback(client.with_msg_id(self._ignore_stored), client, username, target_id, reason)
+		d.addErrback(client.with_msg_id(self._ignore_op_failed), client, "IGNORE")
 
 	def _ignore_stored(self, result, client, username, target_id, reason):
 		# reactor-thread callback: the row is committed; sync in-memory state + reply.
@@ -1992,8 +1998,8 @@ class Protocol:
 		# 3.1: resolve off the reactor (reuse the IGNORE resolver; access is unused here).
 		# The not-ignored check reads live memory and the DELETE runs off the reactor.
 		d = self._root.defer_db(self.userdb._user_access_from_username, username)
-		d.addCallback(self._unignore_resolved, client, username)
-		d.addErrback(self._ignore_op_failed, client, "UNIGNORE")
+		d.addCallback(client.with_msg_id(self._unignore_resolved), client, username)
+		d.addErrback(client.with_msg_id(self._ignore_op_failed), client, "UNIGNORE")
 
 	def _unignore_resolved(self, resolved, client, username):
 		# reactor-thread callback: only memory + a second deferred, so no session bracket.
@@ -2007,8 +2013,8 @@ class Protocol:
 			self.out_SERVERMSG(client, "User is not ignored.")
 			return
 		d = self._root.defer_db(self.userdb.do_unignore_delete, client.user_id, target_id)
-		d.addCallback(self._unignore_removed, client, username, target_id)
-		d.addErrback(self._ignore_op_failed, client, "UNIGNORE")
+		d.addCallback(client.with_msg_id(self._unignore_removed), client, username, target_id)
+		d.addErrback(client.with_msg_id(self._ignore_op_failed), client, "UNIGNORE")
 
 	def _unignore_removed(self, result, client, username, target_id):
 		# reactor-thread callback: the row(s) are deleted; sync in-memory state + reply.
@@ -2029,8 +2035,8 @@ class Protocol:
 		# 3.1: read the ignore list off the reactor thread, then format + send in
 		# _ignorelist_send once the worker returns plain [(ignored_user_id, reason), ...].
 		d = self._root.defer_db(self.userdb.get_ignore_list, client.user_id)
-		d.addCallback(self._ignorelist_send, client)
-		d.addErrback(self._social_list_failed, client, "IGNORELIST")
+		d.addCallback(client.with_msg_id(self._ignorelist_send), client)
+		d.addErrback(client.with_msg_id(self._social_list_failed), client, "IGNORELIST")
 
 	def _ignorelist_send(self, entries, client):
 		# reactor-thread callback. clientFromID may do a reactor-side DB read on an
@@ -2078,8 +2084,8 @@ class Protocol:
 		# online ignore-set is kept in sync with the ignores table, so the db check is
 		# correct either way. Notify an online target in the callback.
 		d = self._root.defer_db(self.userdb.do_friend_request, client.user_id, username, msg)
-		d.addCallback(self._friendrequest_done, client, username, msg)
-		d.addErrback(self._friend_op_failed, client, "FRIENDREQUEST")
+		d.addCallback(client.with_msg_id(self._friendrequest_done), client, username, msg)
+		d.addErrback(client.with_msg_id(self._friend_op_failed), client, "FRIENDREQUEST")
 
 	def _friendrequest_done(self, verdict, client, username, msg):
 		# reactor-thread callback: no reactor-side DB (clientFromID is memory-only here),
@@ -2116,8 +2122,8 @@ class Protocol:
 		# 3.1: verify the request exists + create the friendship + delete the request as ONE
 		# atomic DB unit off the reactor; notify an online requester in the callback.
 		d = self._root.defer_db(self.userdb.do_accept_friend_request, client.user_id, username)
-		d.addCallback(self._acceptfriend_done, client, username)
-		d.addErrback(self._friend_op_failed, client, "ACCEPTFRIENDREQUEST")
+		d.addCallback(client.with_msg_id(self._acceptfriend_done), client, username)
+		d.addErrback(client.with_msg_id(self._friend_op_failed), client, "ACCEPTFRIENDREQUEST")
 
 	def _acceptfriend_done(self, verdict, client, username):
 		if client.session_id not in self._root.clients:
@@ -2141,8 +2147,8 @@ class Protocol:
 			return
 		# 3.1: verify + delete the request as ONE atomic DB unit off the reactor.
 		d = self._root.defer_db(self.userdb.do_decline_friend_request, client.user_id, username)
-		d.addCallback(self._declinefriend_done, client)
-		d.addErrback(self._friend_op_failed, client, "DECLINEFRIENDREQUEST")
+		d.addCallback(client.with_msg_id(self._declinefriend_done), client)
+		d.addErrback(client.with_msg_id(self._friend_op_failed), client, "DECLINEFRIENDREQUEST")
 
 	def _declinefriend_done(self, verdict, client):
 		if client.session_id not in self._root.clients:
@@ -2160,8 +2166,8 @@ class Protocol:
 		# 3.1: resolve + delete the friendship (both directions) as ONE atomic DB unit off
 		# the reactor; notify an online ex-friend in the callback.
 		d = self._root.defer_db(self.userdb.do_unfriend, client.user_id, username)
-		d.addCallback(self._unfriend_done, client, username)
-		d.addErrback(self._friend_op_failed, client, "UNFRIEND")
+		d.addCallback(client.with_msg_id(self._unfriend_done), client, username)
+		d.addErrback(client.with_msg_id(self._friend_op_failed), client, "UNFRIEND")
 
 	def _unfriend_done(self, verdict, client, username):
 		if client.session_id not in self._root.clients:
@@ -2188,8 +2194,8 @@ class Protocol:
 	def in_FRIENDREQUESTLIST(self, client):
 		# 3.1: read off the reactor thread; worker returns plain [(user_id, msg), ...].
 		d = self._root.defer_db(self.userdb.get_friend_request_list, client.user_id)
-		d.addCallback(self._friendrequestlist_send, client)
-		d.addErrback(self._social_list_failed, client, "FRIENDREQUESTLIST")
+		d.addCallback(client.with_msg_id(self._friendrequestlist_send), client)
+		d.addErrback(client.with_msg_id(self._social_list_failed), client, "FRIENDREQUESTLIST")
 
 	def _friendrequestlist_send(self, entries, client):
 		# reactor-thread callback; bracket the session because clientFromID may read the DB.
@@ -2215,8 +2221,8 @@ class Protocol:
 	def in_FRIENDLIST(self, client):
 		# 3.1: read off the reactor thread; worker returns plain [user_id, ...].
 		d = self._root.defer_db(self.userdb.get_friend_user_ids, client.user_id)
-		d.addCallback(self._friendlist_send, client)
-		d.addErrback(self._social_list_failed, client, "FRIENDLIST")
+		d.addCallback(client.with_msg_id(self._friendlist_send), client)
+		d.addErrback(client.with_msg_id(self._social_list_failed), client, "FRIENDLIST")
 
 	def _friendlist_send(self, userIds, client):
 		# reactor-thread callback; bracket the session because clientFromID may read the DB.
@@ -2817,8 +2823,8 @@ class Protocol:
 		# query (joins to User/BridgedUser), so the callback does NO reactor-side DB and
 		# needs no session bracket; it just formats + sends. A pure read, so no new races.
 		d = self._root.defer_db(self.userdb.get_channel_messages, client.user_id, channel.id, last_msg_id, self._channel_history_max_fetch)
-		d.addCallback(self._channelmessages_send, client, chan)
-		d.addErrback(self._channelmessages_failed, client)
+		d.addCallback(client.with_msg_id(self._channelmessages_send), client, chan)
+		d.addErrback(client.with_msg_id(self._channelmessages_failed), client)
 
 	def _channelmessages_send(self, result, client, chan):
 		# reactor-thread callback: pure send, no DB -> no commit/rollback/close bracket.
@@ -3198,8 +3204,8 @@ class Protocol:
 		# plain (username, last_login) tuples. The online/offline check reads shared memory, so
 		# it stays in the reactor callback.
 		d = self._root.defer_db(self.userdb.do_find_ip, address)
-		d.addCallback(self._findip_done, client, address)
-		d.addErrback(self._findip_failed, client, address)
+		d.addCallback(client.with_msg_id(self._findip_done), client, address)
+		d.addErrback(client.with_msg_id(self._findip_failed), client, address)
 
 	def _findip_done(self, results, client, address):
 		if client.session_id not in self._root.clients:
@@ -3237,8 +3243,8 @@ class Protocol:
 		# 3.1: only the offline branch hits the DB (get_ip returns plain data), so defer it.
 		# The online check above is pure memory and stays on the reactor.
 		d = self._root.defer_db(self.userdb.get_ip, username)
-		d.addCallback(self._getip_done, client, username)
-		d.addErrback(self._getip_failed, client, username)
+		d.addCallback(client.with_msg_id(self._getip_done), client, username)
+		d.addErrback(client.with_msg_id(self._getip_failed), client, username)
 
 	def _getip_done(self, found, client, username):
 		if client.session_id not in self._root.clients:
@@ -3285,8 +3291,8 @@ class Protocol:
 		# the old and new name, replies, and disconnects on success; it does no reactor-side DB,
 		# so it needs no session bracket.
 		d = self._root.defer_db(self.userdb.do_rename_account, client.username, newname)
-		d.addCallback(self._renameaccount_done, client, newname)
-		d.addErrback(self._renameaccount_failed, client, newname)
+		d.addCallback(client.with_msg_id(self._renameaccount_done), client, newname)
+		d.addErrback(client.with_msg_id(self._renameaccount_failed), client, newname)
 
 	def _renameaccount_done(self, verdict, client, newname):
 		if client.session_id not in self._root.clients:
@@ -3326,8 +3332,8 @@ class Protocol:
 		# as one atomic DB unit. The callback (on the reactor) invalidates the 1.2 user
 		# cache and replies; it does no reactor-side DB, so it needs no session bracket.
 		d = self._root.defer_db(self.userdb.do_change_password, client.username, cur_password, new_password)
-		d.addCallback(self._changepassword_done, client)
-		d.addErrback(self._changepassword_failed, client)
+		d.addCallback(client.with_msg_id(self._changepassword_done), client)
+		d.addErrback(client.with_msg_id(self._changepassword_failed), client)
 
 	def _changepassword_done(self, verdict, client):
 		if client.session_id not in self._root.clients:
@@ -3640,8 +3646,8 @@ class Protocol:
 		# 3.1: list_bans() returns a plain list of dicts, so it defers cleanly; the callback only
 		# Sends, so it needs no session bracket.
 		d = self._root.defer_db(self.bandb.list_bans)
-		d.addCallback(self._listbans_done, client)
-		d.addErrback(self._listbans_failed, client)
+		d.addCallback(client.with_msg_id(self._listbans_done), client)
+		d.addErrback(client.with_msg_id(self._listbans_failed), client)
 
 	def _listbans_done(self, banlist, client):
 		if client.session_id not in self._root.clients:
@@ -3663,8 +3669,8 @@ class Protocol:
 		# send the blacklist of domains for email verification
 		# 3.1: list_blacklist() returns a plain list of dicts; defer it, callback only Sends.
 		d = self._root.defer_db(self.bandb.list_blacklist)
-		d.addCallback(self._listblacklist_done, client)
-		d.addErrback(self._listblacklist_failed, client)
+		d.addCallback(client.with_msg_id(self._listblacklist_done), client)
+		d.addErrback(client.with_msg_id(self._listblacklist_failed), client)
 
 	def _listblacklist_done(self, blacklist, client):
 		if client.session_id not in self._root.clients:
@@ -3719,8 +3725,8 @@ class Protocol:
 		# 3.1: the access guard stays on the reactor; list_mods() returns plain (admins, mods)
 		# strings, so the query defers and the callback only Sends.
 		d = self._root.defer_db(self.userdb.list_mods)
-		d.addCallback(self._listmods_done, client)
-		d.addErrback(self._listmods_failed, client)
+		d.addCallback(client.with_msg_id(self._listmods_done), client)
+		d.addErrback(client.with_msg_id(self._listmods_failed), client)
 
 	def _listmods_done(self, mods_tuple, client):
 		if client.session_id not in self._root.clients:
@@ -4037,8 +4043,8 @@ class Protocol:
 		# one atomic DB unit; the callback (on the reactor) sets the new email in memory, invalidates
 		# the 1.2 cache and replies. It does no reactor-side DB, so it needs no session bracket.
 		d = self._root.defer_db(self.userdb.do_change_email, client.username, newmail)
-		d.addCallback(self._changeemail_done, client, newmail)
-		d.addErrback(self._changeemail_failed, client, newmail)
+		d.addCallback(client.with_msg_id(self._changeemail_done), client, newmail)
+		d.addErrback(client.with_msg_id(self._changeemail_failed), client, newmail)
 
 	def _changeemail_done(self, verdict, client, newmail):
 		if client.session_id not in self._root.clients:
@@ -4104,8 +4110,8 @@ class Protocol:
 		uid = recover_client.user_id
 		raw, hashed = self.userdb.generate_password()
 		d = self._root.defer_db(self.userdb.do_set_password, uid, hashed)
-		d.addCallback(self._resetpassword_done, client, raw, uid)
-		d.addErrback(self._resetpassword_failed, client)
+		d.addCallback(client.with_msg_id(self._resetpassword_done), client, raw, uid)
+		d.addErrback(client.with_msg_id(self._resetpassword_failed), client)
 
 	def _resetpassword_done(self, verdict, client, raw_password, uid):
 		if client.session_id not in self._root.clients:
@@ -4163,8 +4169,8 @@ class Protocol:
 		uid = recover_client.user_id
 		raw, hashed = self.userdb.generate_password()
 		d = self._root.defer_db(self.userdb.do_set_password, uid, hashed, add_email)
-		d.addCallback(self._resetuserpassword_done, client, raw, uid)
-		d.addErrback(self._resetuserpassword_failed, client)
+		d.addCallback(client.with_msg_id(self._resetuserpassword_done), client, raw, uid)
+		d.addErrback(client.with_msg_id(self._resetuserpassword_failed), client)
 
 	def _resetuserpassword_done(self, verdict, client, raw_password, uid):
 		if client.session_id not in self._root.clients:
@@ -4207,8 +4213,8 @@ class Protocol:
 		# snapshot. The callback only invalidates the cache + Sends, so it needs no session bracket.
 		_raw, hashed = self.userdb.generate_password()
 		d = self._root.defer_db(self.userdb.do_scrub_account, delete_client.user_id, hashed)
-		d.addCallback(self._deleteaccount_done, client, delete_client.username)
-		d.addErrback(self._deleteaccount_failed, client, delete_client.username)
+		d.addCallback(client.with_msg_id(self._deleteaccount_done), client, delete_client.username)
+		d.addErrback(client.with_msg_id(self._deleteaccount_failed), client, delete_client.username)
 
 	def _deleteaccount_done(self, verdict, client, username):
 		if client.session_id not in self._root.clients:

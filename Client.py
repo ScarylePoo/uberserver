@@ -153,6 +153,20 @@ class Client():
 		self.msg_id = '#%s ' % test
 		return (' '.join(msg.split(' ')[1:]))
 
+	def with_msg_id(self, callback):
+		# a reply sent after the handler returns, from a DB callback or the login queue, still
+		# answers the command that started it. Capture that command's id now and put it back
+		# on the client only while the callback runs.
+		msg_id = self.msg_id
+		def run(*args, **kwargs):
+			previous = self.msg_id
+			self.msg_id = msg_id
+			try:
+				return callback(*args, **kwargs)
+			finally:
+				self.msg_id = previous
+		return run
+
 	def setFlagByIP(self, ip, force=True):
 		cc = ip2country.lookup(ip)
 		if force or cc != '??':
