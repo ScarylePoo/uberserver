@@ -58,13 +58,15 @@ class FakeClient:
         self.user_id = USER_ID
         self.session_id = 1
         self.username = "relaytester"
+        self.compat = set()
     def Send(self, data, command=None):
         self.sent.append(data)
 
 
-def ask(root):
+def ask(root, compat=()):
     """Send TURNCREDENTIALS and hand back the single reply line."""
     client = FakeClient()
+    client.compat.update(compat)
     ProtocolModule.Protocol(root).in_TURNCREDENTIALS(client)
     return client.sent[-1] if client.sent else ""
 
@@ -103,6 +105,8 @@ def rejects(lines, label):
 rejects([], "empty file")
 rejects([URI], "URI but no secret")
 rejects(["turn:relay example.org:3478", SECRET], "URI containing a space")
+rejects([URI + ",", SECRET], "a list with an empty entry")
+rejects([",turns:relay.example.org:5349", SECRET], "a list that starts with an empty entry")
 rejects([URI, SECRET, "twelve hours"], "non-numeric lifetime")
 rejects([URI, SECRET, "0"], "zero lifetime")
 rejects([URI, SECRET, "-1"], "negative lifetime")
@@ -147,20 +151,24 @@ _, at_default = parse_and_capture([URI, SECRET])
 check(at_default == [], "the default lifetime should not warn, got %r" % (at_default,))
 
 
-# --- a turns: URI warns, and is still honoured -------------------------------------
-# Coilbox refuses a turns: relay in words, because its relay agent speaks plain UDP and
-# sending UDP at a TLS port would fail as a relay that never answers. Same shape as the
-# lifetime floor above: the operator hears about it, and the server still mints what it
-# was asked for, because another client may support TLS.
+# --- a list is honoured, and only a turns:-only line warns --------------------------
+# A client without the 'turns' flag is sent the first turn: entry, so a list costs it
+# nothing. With no turn: entry it is refused, and every host pays for TLS. Same shape as
+# the lifetime floor above: the operator hears about it, and the server still mints it.
 TURNS_URI = "turns:relay.example.org:5349"
+BOTH_URIS = URI + "," + TURNS_URI
+
+both_config, both_warned = parse_and_capture([BOTH_URIS, SECRET])
+check(both_config[0] == BOTH_URIS,
+      "a list should be handed back as written, got %r" % (both_config,))
+check(both_warned == [],
+      "a list with a turn: entry should not warn, got %r" % (both_warned,))
 
 turns_config, turns_warned = parse_and_capture([TURNS_URI, SECRET])
 check(turns_config[0] == TURNS_URI,
       "a turns: URI should still be honoured, got %r" % (turns_config,))
-check(any("turns:" in w for w in turns_warned),
-      "a turns: URI should warn and name the scheme, got %r" % (turns_warned,))
-check(any("coilbox" in w.lower() for w in turns_warned),
-      "the warning should name the client that refuses it, got %r" % (turns_warned,))
+check(len(turns_warned) == 1 and "only turns:" in turns_warned[0],
+      "a turns: URI on its own should warn once, got %r" % (turns_warned,))
 
 _, plain_warned = parse_and_capture([URI, SECRET])
 check(plain_warned == [],
@@ -219,6 +227,24 @@ if len(parts) == 5:
         "password must depend on the configured secret")
 
 
+# --- a list reaches only the clients that can read it -------------------------------
+parts = ask(FakeRoot(uri=BOTH_URIS), compat={"r", "turns"}).split(" ")
+check(len(parts) == 5 and parts[1] == BOTH_URIS,
+      "a client with 'turns' should get the whole list as the one URI field, got %r" % (parts,))
+
+parts = ask(FakeRoot(uri=TURNS_URI + "," + URI), compat={"r"}).split(" ")
+check(len(parts) == 5 and parts[1] == URI,
+      "a client without 'turns' should get the first turn: entry, got %r" % (parts,))
+
+refused = ask(FakeRoot(uri=TURNS_URI), compat={"r"})
+check(refused.startswith("TURNCREDENTIALSFAILED ") and "TLS" in refused,
+      "a client without 'turns' should be refused a TLS-only relay in words, got %r" % (refused,))
+
+parts = ask(FakeRoot(uri=TURNS_URI), compat={"r", "turns"}).split(" ")
+check(len(parts) == 5 and parts[1] == TURNS_URI,
+      "a client with 'turns' should get a TLS-only relay, got %r" % (parts,))
+
+
 # --- the lifetime is the operator's, not a constant --------------------------------
 short = FakeRoot(ttl=90)
 before = int(time.time())
@@ -268,10 +294,13 @@ configured = compflags(FakeRoot())
 unconfigured = compflags(FakeRoot(uri=None, secret=None))
 check("r" in configured, "COMPFLAGS should advertise 'r' when a relay is configured, got %r" % (configured,))
 check("r" not in unconfigured, "COMPFLAGS should omit 'r' when no relay is configured, got %r" % (unconfigured,))
-check([f for f in configured if f != "r"] == unconfigured,
-      "only 'r' should differ between the two, got %r vs %r" % (configured, unconfigured))
-check("r" in ProtocolModule.flag_map and "r" in ProtocolModule.optional_flags,
-      "'r' must stay a known optional flag on every server, whatever the config")
+check("turns" in configured and "turns" not in unconfigured,
+      "COMPFLAGS should offer 'turns' only when a relay is configured, got %r vs %r" % (configured, unconfigured))
+check([f for f in configured if f not in ("r", "turns")] == unconfigured,
+      "only 'r' and 'turns' should differ between the two, got %r vs %r" % (configured, unconfigured))
+for flag in ("r", "turns"):
+    check(flag in ProtocolModule.flag_map and flag in ProtocolModule.optional_flags,
+          "%r must stay a known optional flag on every server, whatever the config" % flag)
 
 
 if errors:
