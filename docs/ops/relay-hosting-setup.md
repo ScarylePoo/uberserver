@@ -178,7 +178,7 @@ Line 4 is what lets the lobby accept its own public address from a relay host, a
 
 If you gave coturn a certificate and a [TLS listener](../../README.md#tls-on-5349), line 1 can list it after the plain relay, for players whose network blocks UDP: `turn:relay.example.org:3478,turns:relay.example.org:5349`. Clients that can use TLS, which coilbox can from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885), get the whole list. Every other client is sent the `turn:` URI alone, so this is safe to add straight away. Keep the `turn:` URI first: with only `turns:` those clients are refused, and the server logs a warning at startup.
 
-Under Compose the file has to be mounted into the container to be read at all, because the lobby reads it from its working directory and that is `/app` inside the container. `docker-compose.yml` has the line commented out next to the motd and agreement mounts. Uncomment it and put `server_turn.txt` next to `docker-compose.yml`.
+Under Compose the file has to be mounted into the container to be read at all, because the lobby reads it from its working directory and that is `/app` inside the container. Your `docker-compose.yml` — the copy you made from `docker-compose.yml.example` during setup — has the line commented out next to the motd and agreement mounts. Uncomment it and put `server_turn.txt` next to `docker-compose.yml`.
 
 Now check the two copies of the secret match, which is the one thing nothing else will catch. On the lobby:
 

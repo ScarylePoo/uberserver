@@ -40,12 +40,17 @@ cd uberserver
 
 ## 3. Configure the Environment
 
+Two files are yours rather than the repository's, and neither is tracked by git. Copy both from their examples before you build:
+
 ```bash
+cp docker-compose.yml.example docker-compose.yml
 cp .env.example .env
 nano .env
 ```
 
-Fill in your values:
+`docker-compose.yml` is the one you will edit over time — mounting optional config files, pinning ports, turning on the relay profile. It is gitignored so that your edits survive every `git pull` untouched, which is also why the repository ships only the example. Nothing in Compose reads the `.example` file, so skipping the copy leaves `docker compose up` with no services to start.
+
+Fill in your values in `.env`:
 
 | Setting | Description |
 |---|---|
@@ -59,7 +64,7 @@ Fill in your values:
 | `ONLINE_IP` | Optional. The server's own public IP. Leave blank to auto-detect. Affects battles hosted on the same LAN as the server, and identifies the server's own traffic. See [Host IP Detection](#host-ip-detection). |
 | `EXTRA_ARGS` | Optional extra arguments passed to server.py. |
 
-> **Never commit your `.env` file to source control — it contains passwords.**
+> **Never commit your `.env` file to source control — it contains passwords.** `.gitignore` already covers it, along with `docker-compose.yml` and the optional config files under [Optional Config Files](#optional-config-files). Because none of them are in git, they are also the files no clone will give you back: keep a copy somewhere off the machine.
 
 ---
 
@@ -194,6 +199,15 @@ git pull
 docker compose build --no-cache
 docker compose up -d
 ```
+
+Your `docker-compose.yml` is not tracked, so a pull never touches it — and never updates it either. When the example changes, those changes are yours to apply by hand. Check after each pull:
+
+```bash
+git log --oneline -5 -- docker-compose.yml.example
+diff docker-compose.yml docker-compose.yml.example
+```
+
+The diff always shows your own edits too, so read it for new keys rather than expecting it to come back empty. Past changes to that file have included the container file-descriptor limits and `net.core.somaxconn`, both of which decide how many players the server can hold, so this is worth the ten seconds.
 
 ### Auto-start on Reboot
 
