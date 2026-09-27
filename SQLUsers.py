@@ -1676,6 +1676,31 @@ class VerificationsHandler:
 		self.send(entry)
 		return True, ''
 
+	def pending(self, user_id):
+		# the user's unexpired verification entry, or None. Does not touch attempts/resends.
+		entry = self.sess().query(Verification).filter(Verification.user_id == user_id).first()
+		if entry and entry.expiry <= datetime.now():
+			return None
+		return entry
+
+	def ensure_pending(self, user_id, email, digits, reason):
+		# Guarantee that a user who is being asked for a verification code actually has
+		# one to enter. An account can end up in access='agreement' with no verifications
+		# row (the code was consumed by verify() but the follow-up write never landed,
+		# the row was cleaned, or a manual DB edit) and there is no self-service way out:
+		# CONFIRMAGREEMENT answers 'Unexpected verification attempt' and RESENDVERIFICATION
+		# refuses because there is nothing to resend. Returns (sent_new, reason): sent_new
+		# is True only when a fresh code was created and emailed; reason is the
+		# check_and_send failure text when one could not be issued.
+		if not self.active():
+			return False, ''
+		if self.pending(user_id):
+			return False, ''
+		good, reason = self.check_and_send(user_id, email, digits, reason)
+		if not good:
+			logging.error('Could not issue a replacement verification code for user %s (%s): %s' % (user_id, email, reason))
+		return good, reason
+
 	def create(self, user_id, email, digits, reason):
 		entry = Verification(user_id, email, digits, reason)
 		self.sess().add(entry)
@@ -1764,7 +1789,31 @@ class VerificationsHandler:
 			logging.error('Failed to send email from %s to %s' % (sent_from, to))
 			logging.error(str(e))
 
-	def verify (self, user_id, email, code):
+	# a verification row records what it was issued for in its free-text `reason` (see
+	# check_and_send's callers); these prefixes identify each purpose, so verify() can refuse
+	# to spend a code on a different flow than the one that issued it without a schema change
+	PURPOSE_PREFIXES = {
+		'register':    'registered an account',
+		'reset':       'requested to recover your account',
+		'changeemail': 'requested to change your email address',
+	}
+	PURPOSE_LABELS = {
+		'register':    'confirming your registration',
+		'reset':       'resetting your password',
+		'changeemail': 'changing your email address',
+	}
+
+	def purpose_of(self, entry):
+		for purpose, prefix in self.PURPOSE_PREFIXES.items():
+			if (entry.reason or '').startswith(prefix):
+				return purpose
+		return None
+
+	def verify (self, user_id, email, code, purpose=None):
+		# purpose: 'register', 'reset' or 'changeemail' - the flow that is spending the code.
+		# A code issued for one flow is refused by the others (a registration code entered
+		# into the reset-password dialog used to consume it AND reset the password, leaving the
+		# account stuck at the agreement screen with no code left). None skips the check.
 		if not self.active():
 			return True, ''
 		if code=="":
@@ -1773,6 +1822,10 @@ class VerificationsHandler:
 		if not entry:
 			logging.error('Unexpected verification attempt: %s, %s' % (user_id, code))
 			return False, 'Unexpected verification attempt, please request a verification code'
+		issued_for = self.purpose_of(entry)
+		if purpose and issued_for and issued_for != purpose:
+			logging.info('Refused to use the %s verification code of user %s for %s' % (issued_for, user_id, purpose))
+			return False, 'Your current verification code was issued for %s, not for %s. Use it there, or wait for it to expire (up to 48h)' % (self.PURPOSE_LABELS[issued_for], self.PURPOSE_LABELS[purpose])
 		if entry.expiry <= datetime.now():
 			return False, 'Your verification code for ' + entry.email + ' has expired, please request a new one'
 		if entry.attempts>=3:

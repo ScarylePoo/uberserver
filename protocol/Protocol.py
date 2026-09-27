@@ -1318,6 +1318,13 @@ class Protocol:
 		if (client.access == 'agreement'):
 			logging.info('[%s] Sent user <%s> the terms of service on session.' % (client.session_id, dbuser.username))
 			if self.verificationdb.active():
+				# make the sentence below true: if this account has no pending code (see
+				# VerificationsHandler.ensure_pending) issue a fresh one now, otherwise the
+				# user is stuck at the agreement screen with nothing valid to enter
+				verif_reason = "registered an account on the " + self._root.mail_identity + " lobbyserver (username: %s)" % dbuser.username
+				sent_new, reason = self.verificationdb.ensure_pending(client.user_id, client.email, 4, verif_reason)
+				if sent_new:
+					logging.info('[%s] Issued a replacement verification code for <%s> on login (no pending code found).' % (client.session_id, dbuser.username))
 				client.Send("AGREEMENT A verification code has been sent to your email address. Please read our terms of service and then enter your four digit code below.")
 				client.Send("AGREEMENT ")
 			for line in self._root.agreement:
@@ -1481,8 +1488,26 @@ class Protocol:
 		if delay:
 			self.out_DENIED(client, client.username, reason)
 			return
-		
-		good, reason = self.verificationdb.verify(client.user_id, client.email, verification_code)
+
+		# a second CONFIRMAGREEMENT (double click, client retry) arriving while the first
+		# one's access write is still in flight would find the code already consumed and
+		# be answered 'Unexpected verification attempt'; just drop it, the first one's
+		# callback will answer the client
+		if getattr(client, 'confirming_agreement', False):
+			return
+
+		if self.verificationdb.active() and not self.verificationdb.pending(client.user_id):
+			# nothing to verify against (see VerificationsHandler.ensure_pending): issue a
+			# fresh code rather than leaving the user with no way forward
+			verif_reason = "registered an account on the " + self._root.mail_identity + " lobbyserver (username: %s)" % client.username
+			sent_new, reason = self.verificationdb.ensure_pending(client.user_id, client.email, 4, verif_reason)
+			if sent_new:
+				self.out_DENIED(client, client.username, 'No active verification code was found for your account, so a new one has just been sent to %s. Please enter that code.' % client.email)
+			else:
+				self.out_DENIED(client, client.username, 'No active verification code was found for your account and a new one could not be sent (%s). Please contact %s.' % (reason, self.verificationdb.mail_contact_addr))
+			return
+
+		good, reason = self.verificationdb.verify(client.user_id, client.email, verification_code, 'register')
 		if not good:
 			self.out_DENIED(client, client.username, reason)
 			return
@@ -1493,11 +1518,13 @@ class Protocol:
 		# the moderator 'Agr:' broadcast only after the write commits, and runs the login state
 		# dump. _SendLoginInfo touches the DB on the reactor (get_ignored_user_ids), so the
 		# callback brackets it with the session guards exactly like _login_finish does.
+		client.confirming_agreement = True
 		d = self._root.defer_db(self.userdb.do_confirm_agreement, client.username)
 		d.addCallback(client.with_msg_id(self._confirmagreement_done), client)
 		d.addErrback(client.with_msg_id(self._confirmagreement_failed), client)
 
 	def _confirmagreement_done(self, uid, client):
+		client.confirming_agreement = False
 		if client.session_id not in self._root.clients:
 			return # client disconnected during the DB write
 		if uid is None:
@@ -1526,6 +1553,7 @@ class Protocol:
 		self._SendLoginInfo(client)
 
 	def _confirmagreement_failed(self, failure, client):
+		client.confirming_agreement = False
 		logging.error("CONFIRMAGREEMENT DB error for <%s>: %s" % (getattr(client, 'username', '?'), failure.getTraceback()))
 		if client.session_id in self._root.clients:
 			self.out_DENIED(client, client.username, "Server error processing CONFIRMAGREEMENT.")
@@ -4073,7 +4101,7 @@ class Protocol:
 		if found and not client.bot: # bots should share email addr with the bot owner
 			client.Send("CHANGEEMAILDENIED another user is already registered to the email address '%s'" % newmail)
 			return
-		good, reason = self.verificationdb.verify(client.user_id, newmail, verification_code)
+		good, reason = self.verificationdb.verify(client.user_id, newmail, verification_code, 'changeemail')
 		if not good:
 			client.Send("CHANGEEMAILDENIED " + reason)
 			return
@@ -4122,8 +4150,10 @@ class Protocol:
 		reason = "requested to recover your account <" + recover_client.username + "> on the " + self._root.mail_identity + " lobbyserver"
 		good, reason = self.verificationdb.check_and_send(recover_client.user_id, email, 8, reason)
 		if not good:
+			logging.info('[%s] RESETPASSWORDREQUEST denied for <%s> from %s: %s' % (client.session_id, recover_client.username, client.ip_address, reason))
 			client.Send("RESETPASSWORDREQUESTDENIED " + reason)
 			return
+		logging.info('[%s] RESETPASSWORDREQUEST accepted for <%s> from %s' % (client.session_id, recover_client.username, client.ip_address))
 		client.Send("RESETPASSWORDREQUESTACCEPTED %s" % recover_client.email)
 
 	def in_RESETPASSWORD(self, client, email, verification_code):
@@ -4138,10 +4168,12 @@ class Protocol:
 			client.Send("RESETPASSWORDDENIED " + response)
 			return
 		recover_client = self.clientFromID(response, True)
-		good, reason = self.verificationdb.verify(recover_client.user_id, email, verification_code)
+		good, reason = self.verificationdb.verify(recover_client.user_id, email, verification_code, 'reset')
 		if not good:
+			logging.info('[%s] RESETPASSWORD denied for <%s> from %s: %s' % (client.session_id, recover_client.username, client.ip_address, reason))
 			client.Send("RESETPASSWORDDENIED " + reason)
 			return
+		logging.info('[%s] RESETPASSWORD verified for <%s> from %s, resetting password' % (client.session_id, recover_client.username, client.ip_address))
 
 		# 3.1: the email lookup + verification gate stay on the reactor (verify self-commits). The
 		# new password is generated HERE on the reactor and written off the reactor as one atomic
