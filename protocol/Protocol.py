@@ -898,11 +898,45 @@ class Protocol:
 			return lan_ip
 		return relayed_ip
 
+	def turnRelayHostPort(self):
+		'''
+		host:port of the relay's STUN/TURN listener, from the first plain turn: entry on
+		line 1 of server_turn.txt, or None when that entry names no port. That is the entry
+		turnUriFor gives a client without 'turns', and the UDP one a client tries first.
+
+		The port is never filled in. Nothing in the server sets a default, and coturn's own
+		default of 3478 only holds if the operator left listening-port alone. Any query string
+		(?transport=udp) is dropped, because it is not part of the address. An IPv6 host
+		keeps its brackets, so the last colon always separates the port.
+		'''
+		uri = self._root.turn_uri
+		if not uri:
+			return None
+		for entry in uri.split(','):
+			if entry.startswith('turns:'):
+				continue
+			if not entry.startswith('turn:'):
+				return None
+			hostport = entry[len('turn:'):].split('?', 1)[0]
+			if hostport.startswith('['):
+				host, sep, port = hostport.partition(']:')
+				host += ']'
+				host_ok = len(host) > 2
+			else:
+				host, sep, port = hostport.rpartition(':')
+				host_ok = bool(host) and ':' not in host
+			if not sep or not host_ok:
+				return None
+			if not (port.isascii() and port.isdigit() and 0 < int(port) < 65536):
+				return None
+			return '%s:%s' % (host, port)
+		return None
+
 	def client_AddBattleLines(self, client, battle):
 		'''
 		Everything that announces a battle to one client: its BATTLEOPENED, then
 		BATTLEISRELAYED <battle_id> when the battle goes through a relay and the client sent
-		'r'.
+		'r', then BATTLERELAYADDRESS <battle_id> <host:port> when the relay's address is known.
 
 		BATTLEOPENED for a relayed battle is identical to a direct one, which is what lets a
 		client with no relay support join it. That also leaves a joiner unable to tell why
@@ -910,10 +944,17 @@ class Protocol:
 		gated on 'r' like CLIENTIP and BATTLEHOSTMOVED. A battle cannot become relayed after
 		it opens, because MOVERELAYEDHOST refuses one that was not, so this is the only place
 		it needs saying.
+
+		The address is a line of its own rather than an argument of BATTLEISRELAYED because a
+		client that already parses BATTLEISRELAYED reads its whole argument as a battle id,
+		and treats a line with anything else in it as unknown.
 		'''
 		lines = [self.client_AddBattle(client, battle)]
 		if battle.relayed_ip and 'r' in client.compat:
 			lines.append('BATTLEISRELAYED %s' % battle.battle_id)
+			address = self.turnRelayHostPort()
+			if address:
+				lines.append('BATTLERELAYADDRESS %s %s' % (battle.battle_id, address))
 		return lines
 
 	def client_AddBattle(self, client, battle):
