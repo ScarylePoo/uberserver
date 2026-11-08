@@ -411,6 +411,28 @@ in a direct game. `BATTLEOPENED` itself is unchanged, which is what lets a clien
 support join. A battle stays relayed until `BATTLECLOSED`: `MOVERELAYEDHOST` only moves a
 battle that already is one, so nothing turns a direct battle into a relayed one.
 
+```
+S> BATTLERELAYADDRESS <battle_id> <host:port>
+```
+
+Follows `BATTLEISRELAYED` for the same battle, in the same two places and to the same clients.
+It gives the relay's own address, so a joiner can time its half of the ping to the relay without
+spending a `TURNCREDENTIALS` credential. It is a line of its own because a client that already
+reads `BATTLEISRELAYED` takes everything after the command as a battle id, so an argument added
+to that line would make it ignore the line. A client that does not know `BATTLERELAYADDRESS`
+only misses the address.
+
+`<host:port>` comes from line 1 of `server_turn.txt`: the first entry that does not start with
+`turns:`, which is the entry a client without the `turns` flag is sent in `TURNCREDENTIALS`. The
+host and port are copied as written, so the host may be a name, and an IPv6 address keeps its
+brackets, as in `[2606:4700:4700::1111]:3478`. A query string such as `?transport=udp` is
+dropped. The address is the same for every battle on the server, and it is not secret.
+
+The line is left out, and `BATTLEISRELAYED` is still sent, when that entry names no port. The
+server does not assume 3478: coturn listens there by default, but the operator can change it,
+and a wrong port would send the client's ping to nothing. A client has to treat the line as
+optional.
+
 #### Joiner addresses (`CLIENTIP`)
 
 A TURN relay only forwards traffic from an address the host has already installed a
