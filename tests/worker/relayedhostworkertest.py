@@ -353,10 +353,90 @@ for who, lines in direct_seen.items():
 battle = root.battles[battle_id]
 late_aware = FakeClient(root, "lateaware", compat=("u", "sp", "r"), ip=OUTSIDER)
 late_plain = FakeClient(root, "lateplain", ip=OUTSIDER)
-check([l.split(" ")[0] for l in root.protocol.client_AddBattleLines(late_aware, battle)] == ["BATTLEOPENED", "BATTLEISRELAYED"],
+check([l.split(" ")[0] for l in root.protocol.client_AddBattleLines(late_aware, battle)][:2] == ["BATTLEOPENED", "BATTLEISRELAYED"],
       "the login battle list should name a relayed battle to a client with 'r'")
 check([l.split(" ")[0] for l in root.protocol.client_AddBattleLines(late_plain, battle)] == ["BATTLEOPENED"],
       "the login battle list should be unchanged for a client without 'r'")
+
+
+# --- the relay's address follows BATTLEISRELAYED, as a line of its own ---------------
+# A client that already parses BATTLEISRELAYED reads its whole argument as a battle id, so
+# the address cannot be added to that line. BATTLERELAYADDRESS goes to the same clients, in
+# the same two places, and is left out when the first turn: entry names no port.
+ADDRESS_LINES = ("BATTLEOPENED ", "BATTLEISRELAYED ", "BATTLERELAYADDRESS ")
+
+def announced_with_address(uri, relayed=True):
+    FakeClient._next_session = 1
+    root = FakeRoot()
+    root.turn_uri = uri
+    host = FakeClient(root, "host", compat=("u", "sp", "r"))
+    FakeClient(root, "relayaware", compat=("u", "sp", "r"), ip=OUTSIDER)
+    FakeClient(root, "plain", ip=OUTSIDER)
+    if relayed:
+        relayedhost(root, host, RELAY_V4)
+    openbattle(root, host)
+    battle_id = root.usernames["host"].current_battle
+    return root, battle_id, {name: [l for l in client.sent if l.startswith(ADDRESS_LINES)]
+                             for name, client in root.usernames.items()}
+
+root, battle_id, seen = announced_with_address("turn:relay.example.org:3478")
+for who in ("host", "relayaware"):
+    check(seen[who][1:] == ["BATTLEISRELAYED %s" % battle_id,
+                            "BATTLERELAYADDRESS %s relay.example.org:3478" % battle_id],
+          "%s sent 'r' and should be told the relay's address right after BATTLEISRELAYED, got %r" % (who, seen[who]))
+check([l.split(" ")[0] for l in seen["plain"]] == ["BATTLEOPENED"],
+      "a client without 'r' should never be sent the relay's address, got %r" % (seen["plain"],))
+
+_, _, direct_seen = announced_with_address("turn:relay.example.org:3478", relayed=False)
+for who, lines in direct_seen.items():
+    check([l.split(" ")[0] for l in lines] == ["BATTLEOPENED"],
+          "a direct battle should have no relay address, %s got %r" % (who, lines))
+
+battle = root.battles[battle_id]
+late_aware = FakeClient(root, "lateaware2", compat=("u", "sp", "r"), ip=OUTSIDER)
+late_plain = FakeClient(root, "lateplain2", ip=OUTSIDER)
+check(root.protocol.client_AddBattleLines(late_aware, battle)[1:] ==
+      ["BATTLEISRELAYED %s" % battle_id, "BATTLERELAYADDRESS %s relay.example.org:3478" % battle_id],
+      "the login battle list should carry the relay's address for a client with 'r'")
+check(len(root.protocol.client_AddBattleLines(late_plain, battle)) == 1,
+      "the login battle list should carry no relay address for a client without 'r'")
+
+# which address, from line 1 of server_turn.txt: the first turn: entry, host:port as written,
+# no query string, and nothing at all rather than a guessed port
+for uri, expected in [
+        ("turn:relay.example.org:3478", "relay.example.org:3478"),
+        ("turn:relay.example.org:3478?transport=udp", "relay.example.org:3478"),
+        ("turn:relay.example.org:3478,turns:relay.example.org:5349", "relay.example.org:3478"),
+        ("turns:relay.example.org:5349,turn:relay.example.org:3480", "relay.example.org:3480"),
+        ("turn:relay.example.org:3478,turn:other.example.org:3479", "relay.example.org:3478"),
+        ("turn:185.199.108.153:3478", "185.199.108.153:3478"),
+        ("turn:[2606:4700:4700::1111]:3478", "[2606:4700:4700::1111]:3478"),
+        ("turn:[2606:4700:4700::1111]:3478?transport=udp", "[2606:4700:4700::1111]:3478"),
+        # no turn: entry, or the first one names no usable port
+        ("turns:relay.example.org:5349", None),
+        ("turn:relay.example.org", None),
+        ("turn:relay.example.org?transport=udp", None),
+        ("turn:relay.example.org,turn:other.example.org:3478", None),
+        ("turn:[2606:4700:4700::1111]", None),
+        ("turn:2606:4700:4700::1111", None),
+        ("turn:[]:3478", None),
+        ("turn::3478", None),
+        ("turn:relay.example.org:0", None),
+        ("turn:relay.example.org:65536", None),
+        ("turn:relay.example.org:34x8", None),
+        ("turn:relay.example.org:", None),
+        ("relay.example.org:3478", None),
+        (None, None),
+        ]:
+    root.turn_uri = uri
+    check(root.protocol.turnRelayHostPort() == expected,
+          "%r should give the relay address %r, got %r" % (uri, expected, root.protocol.turnRelayHostPort()))
+
+# a relayed battle whose relay names no port is still called relayed, with no address line
+_, _, no_port = announced_with_address("turn:relay.example.org")
+for who in ("host", "relayaware"):
+    check([l.split(" ")[0] for l in no_port[who]] == ["BATTLEOPENED", "BATTLEISRELAYED"],
+          "with no port to give, %s should get BATTLEISRELAYED alone, got %r" % (who, no_port[who]))
 
 
 # --- the address belongs to one battle and no other -------------------------------

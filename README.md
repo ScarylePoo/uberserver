@@ -509,6 +509,8 @@ turn:relay.example.org:3478,turns:relay.example.org:5349
 
 A client tries the `turn:` relay first and moves to `turns:` only when UDP gets no answer. The whole list goes only to clients that sent the `turns` compatibility flag, which coilbox does from [tomjn/coilbox#2885](https://github.com/tomjn/coilbox/pull/2885). Every other client is sent the first `turn:` entry and works as before, so the list is safe to add before players update.
 
+Give the first `turn:` URI a port. Relay-aware clients are told that entry's `host:port` with `BATTLERELAYADDRESS`, so a joiner can time its ping to the relay, and a `turn:` URI with no port means they are told nothing. The server does not fill in 3478 for you.
+
 Keep a `turn:` URI in the list. With only `turns:`, a client without the flag is refused a credential, and every host goes over TLS, which adds delay even where UDP works. The server logs a warning at startup if line 1 names only `turns:`. [TLS on 5349](#tls-on-5349) covers what the relay needs.
 
 This file is only the lobby's half. Running the relay itself, what it costs to run, and how to check it works are in [Relay Hosting (TURN)](#relay-hosting-turn). If you are turning relay hosting on for the first time, follow [docs/ops/relay-hosting-setup.md](docs/ops/relay-hosting-setup.md), which puts the whole job in order.
